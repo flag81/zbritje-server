@@ -328,14 +328,7 @@ console.log("searchText", searchText);
     ELSE true
   END
 
-    and 
 
-  CASE 
-    WHEN ${searchText.length} > 0 THEN  INSTR(products.productName, ${searchText}) > 0
-
-   
-    ELSE true
-  END
 
 
 
