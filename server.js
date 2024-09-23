@@ -240,7 +240,7 @@ app.get("/getProductsByIds", (req, res) => {
   }
   );
 
-app.get("/products",verifyToken, (req, res) => {
+app.get("/products", (req, res) => {
 
 
   let offset1 = parseInt(req.query.offset, 10);
