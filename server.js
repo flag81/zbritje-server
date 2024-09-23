@@ -345,7 +345,7 @@ console.log("searchText", searchText);
   //LIMIT ${req.query.limit} OFFSET ${req.query.offset}
   const userId= req.query.userId;
 
-  //console.log("q",q);
+  console.log("q",q);
 
 
 
