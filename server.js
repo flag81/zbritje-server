@@ -79,6 +79,14 @@ app.get('/read-cookie', (req, res) => {
 
 app.get('/clear-cookie', (req, res) => {
   res.clearCookie('name').end();
+
+
+
+
+
+
+
+  
 });
 
 app.get('/get-data', (req, res) => {
@@ -95,6 +103,10 @@ app.get('/get-data', (req, res) => {
 
 const verifyToken = (req, res, next) => {
   const token = req.headers['authorization'];
+
+
+  console.log("process.env.TOKEN_SECRET",process.env.TOKEN_SECRET)
+  
   if (!token) {
     return res.status(403).send('A token is required for authentication');
   }
