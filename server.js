@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 
-import db from './connection.js';
+import db from './connection2.js';
 
 import sessions from "express-session";
 import cookieParser from "cookie-parser";
