@@ -131,6 +131,10 @@ app.post('/auth', (req, res) => {
 
   // Generate a token
   const token = jwt.sign(user, process.env.TOKEN_SECRET, { expiresIn: '24h' });
+
+
+   console.log("token:", token);
+  
   res.json({ token });
 });
 
