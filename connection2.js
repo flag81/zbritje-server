@@ -1,12 +1,11 @@
 //jshint esversion: 6
 import mysql from 'mysql2';
 
-
 const db = mysql.createPool({
   connectionLimit:4,
-  host: "mysql.railway.internal",
+  host: "autorack.proxy.rlwy.net",
+  port: 59414,
   user: "root",
-  port: 3306,
   password: "sVclMskbFgSLmFwJcrIxhUELEHhSKMQo",
   database:"railway",
 });
