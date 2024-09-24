@@ -121,6 +121,8 @@ const verifyToken = (req, res, next) => {
 
 
 
+
+
 app.post('/auth', (req, res) => {
   // Mock user authentication
   const user = { username: req.body.username};
