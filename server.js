@@ -129,10 +129,12 @@ app.post('/auth', (req, res) => {
 
   console.log("process.env.TOKEN_SECRET", process.env.TOKEN_SECRET);
 
+
+  console.log("test1");
   // Generate a token
   const token = jwt.sign(user, process.env.TOKEN_SECRET, { expiresIn: '24h' });
 
-
+console.log("test2");
    console.log("token:", token);
   
   res.json({ token });
