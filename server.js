@@ -125,9 +125,9 @@ const verifyToken = (req, res, next) => {
 
 app.post('/auth', (req, res) => {
   // Mock user authentication
-  const user = { username: req.body.username};
+  const user = "admin";
 
-  console.log("user:", req.body.username);
+  //console.log("user:", req.body.username);
 
   console.log("process.env.TOKEN_SECRET", process.env.TOKEN_SECRET);
 
