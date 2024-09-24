@@ -125,7 +125,7 @@ app.post('/auth', (req, res) => {
   // Mock user authentication
   const user = { username: req.body.username};
 
-  console.log("username:", req.body.username);
+  console.log("user:", req.body.username);
 
   console.log("process.env.TOKEN_SECRET", process.env.TOKEN_SECRET);
 
@@ -258,7 +258,7 @@ app.get("/getProductsByIds", (req, res) => {
   }
   );
 
-app.get("/products",verifyToken, (req, res) => {
+app.get("/products", (req, res) => {
 
 
   let offset1 = parseInt(req.query.offset, 10);
