@@ -1,5 +1,8 @@
+// for context use main.sql for database structure
+
 import express from "express";
 import cors from "cors";
+
 
 import db from './connection.js';
 
@@ -135,6 +138,51 @@ app.get("/", (req, res) => {
 app.get("/getUserEmail", (req, res) => {
 
   //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+  const q = `SELECT email FROM users WHERE userId = "${req.query.userId}"`;
+  
+
+  console.log("getUserEmail:", q);
+
+  const userId= req.query.userId;
+
+  db.query(q, [userId], (err, data) => {
+
+    if (err) {
+
+
+      console.log("getUserEmail error:", err);
+      return res.json(err);
+    }
+
+    return res.json(data);
+  });
+});
+
+
+app.get("/getUserId", (req, res) => {
+
+  //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+  const q = `SELECT userId, expoPushToken FROM users WHERE userName = "${req.query.userName}"`;
+  
+
+  console.log("getUserId:",q);
+
+  const userName= req.query.userName;
+
+  db.query(q, [userName], (err, data) => {
+
+    if (err) {
+      console.log(err);
+      return res.json(err);
+    }
+
+    return res.json(data);
+  });
+});
+
+app.get("/", (req, res) => {
+
+  //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
   const q = `SELECT email FROM users WHERE userId = ${req.query.userId}`;
   
 
@@ -151,6 +199,67 @@ app.get("/getUserEmail", (req, res) => {
   });
 });
 
+
+//write a get endpoint getExpoPushNotificationToken that takes userId as a parameter and returns the expo push notification token for the user from users table
+
+app.get("/getExpoPushNotificationToken", (req, res) => {
+  
+    //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+    const q = `SELECT expoPushToken FROM users WHERE userId = ${req.query.userId}`;
+    
+    const userId= req.query.userId;
+  
+    db.query(q, [userId], (err, data) => {
+  
+      if (err) {
+        console.log(err);
+        return res.json(err);
+      }
+
+      console.log("expoPushToken", data);
+  
+      return res.json(data);
+    });
+  });
+
+  //write a get endpoint setExpoPushNotificationToken that takes userId and expoPushToken as parameters and updates the expo push notification token for the user in the users table
+
+  app.put("/updateExpoPushNotificationToken", (req, res) => {
+
+    //convert string to number
+    const userId = parseInt(req.body.userId);
+
+
+    console.log("userId",userId);
+
+    
+
+    //convert to string with escape characters
+    const expoPushToken = req.body.expoPushToken;
+
+    console.log("setExpoPushNotificationToken expoPushToken:::::",expoPushToken);
+
+
+    const q = `UPDATE users SET expoPushToken="${expoPushToken}" WHERE userId = ${userId}`;
+
+
+    console.log("q setExpoPushNotificationToken:",q);
+
+    const values = [
+      req.body.userId,
+      req.body.expoPushToken
+    ];
+
+    //console.log(">>" + q);
+    //console.log(">>" + req.body.expoPushToken);
+
+    db.query(q, [values], (err, data) => {
+      if (err) return res.send(err);
+
+      //console.log("id",bookId)
+      return res.json(data);
+    });
+  });
 
 
 app.get("/getUserNotificationLevel", (req, res) => {
@@ -251,6 +360,11 @@ app.get("/products",verifyToken, (req, res) => {
   }
 
 
+  let userId = parseInt(req.query.userId, 10);
+  if (isNaN(userId) || userId < 0) {
+    userId = 0;
+  } 
+
   let storeId = parseInt(req.query.storeId, 10);
   if (isNaN(storeId) || storeId < 0) {
     storeId = 0;
@@ -266,10 +380,17 @@ app.get("/products",verifyToken, (req, res) => {
 
   console.log("storeId", storeId);
 
+  console.log("userId", userId);
+
   console.log("categoryId", categoryId);
 
 
   let searchText = db.escape(req.query.searchText);
+
+  let onSale = req.query.onSale;
+
+  let isFavorite = req.query.isFavorite;
+
 
 //get length of the string and console.log it
 console.log("searchText", searchText);
@@ -280,37 +401,58 @@ console.log("searchText", searchText);
 
 
   //offset1 = parseInt(offset1);
-
   //console.log("valuessssss")
   //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
-
 // change the query so if storeId is greater than 0 then it will filter by storeId
 // if storeId is 0 then it will return all products
 
 
+
+
   const q = 
   
-  `SELECT products.productId, products.productName, products.productPic, products.categoryId, 
-  products.productSize , products.subCategoryId, products.storeId, products.imageUrl,
-    sales.saleId, sales.saleStartDate,sales.saleEndDate,sales.storeLogo, sales.oldPrice, sales.discountPrice,
-    sales.discountPercentage, store.storeLogo as storeLogo,
+  `
+  SELECT 
+  products.productId, 
+  products.productName, 
+  products.productPic, 
+  products.categoryId, 
+  products.productSize, 
+  products.subCategoryId, 
+  products.storeId, 
+  products.imageUrl,
+  products.productUrl,
+  products.productRating,
+  sales.saleId, 
+  sales.saleStartDate,
+  sales.saleEndDate,
+  sales.storeLogo, 
+  sales.oldPrice, 
+  sales.discountPrice,
+  sales.discountPercentage, 
+  store.storeLogo as storeLogo,
 
-    CASE 
-        WHEN f.id IS NOT NULL THEN true 
-        ELSE false 
-    END AS isFavorite ,
+  CASE 
+    WHEN f.userId = ${userId} THEN true 
+    ELSE false 
+  END AS isFavorite,
   
   CASE 
-        WHEN
-    CURRENT_DATE() between sales.saleStartDate and sales.saleEndDate THEN true 
-            ELSE false 
-    END AS onSale
+    WHEN sf.id IS NOT NULL THEN true 
+    ELSE false 
+  END AS isStoreFavorite, -- Added this line to check if the store is a favorite
   
-  FROM products
+  CASE 
+    WHEN CURRENT_DATE() BETWEEN sales.saleStartDate AND sales.saleEndDate THEN true 
+    ELSE false 
+  END AS onSale
   
-  left join sales on products.productId = sales.productId
-  left join store on products.storeId = store.storeId
-  left join favorites f on products.productId = f.productId
+FROM products
+  
+LEFT JOIN sales ON products.productId = sales.productId
+LEFT JOIN store ON products.storeId = store.storeId
+LEFT JOIN favorites f ON products.productId = f.productId and f.userId = ${userId}
+LEFT JOIN storefavorites sf ON store.storeId = sf.storeId and sf.userId = ${userId} -- Assuming the join condition is correct
 
 
   WHERE 
@@ -329,19 +471,36 @@ console.log("searchText", searchText);
     and 
 
   CASE 
-    WHEN ${searchText.length} > 0 THEN  INSTR(products.productName, ${searchText}) > 0
+
+  WHEN ${onSale} = 1 THEN CURRENT_DATE() between sales.saleStartDate and sales.saleEndDate 
+    ELSE true
+  END
+
+    and 
+
+  CASE 
+    WHEN ${searchText.length} > 2 THEN  INSTR(products.productName, ${searchText}) > 0
 
    
     ELSE true
   END
 
+  and 
+    (CASE 
+        WHEN ${isFavorite} = 1 THEN f.id IS NOT NULL
+        ELSE true
+    END)
 
 
-  order by isFavorite DESC,sales.saleEndDate DESC limit 10 OFFSET ${offset1} `;
+
+  order by isFavorite DESC,sales.saleEndDate DESC,
+  isStoreFavorite DESC
+  
+  limit 10 OFFSET ${offset1} `;
 
 
   //LIMIT ${req.query.limit} OFFSET ${req.query.offset}
-  const userId= req.query.userId;
+  //const userId= req.query.userId;
 
   //console.log("q",q);
 
@@ -440,12 +599,105 @@ app.get("/getCategories", (req, res) => {
   });
 });
 
+// create a new endpoint isBrandFavorite that takes userId and brandId as parameters and returns true if the brand is favorite for the user and false otherwise
+app.get("/isBrandFavorite", (req, res) => {
+
+  //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+
+  const userId=  parseInt(req.query.userId);
+  const brandId=  parseInt(req.query.brandId);
+  
+    const q = `SELECT count(userId) as cnt
+
+    FROM brandfavorites
+      
+      WHERE brandfavorites.userId=${userId}
+      AND
+      brandfavorites.brandId=${brandId}
+
+      `;
+
+    //const userId=  parseInt(req.query.userId);
+
+    db.query(q, [userId, brandId], (err, data) => {
+        
+        if (err) {
+          console.log(err);
+          return res.json(err);
+        }
+  
+        return res.json(data);
+      });
+    }
+
+  );
+      
+
+
+app.get("/isStoreFavorite", (req, res) => {
+
+  //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+
+  const userId=  parseInt(req.query.userId);
+  const storeId=  parseInt(req.query.storeId);
+
+
+  
+    const q = `SELECT count(userId) as cnt
+
+    FROM storefavorites 
+    
+    WHERE storefavorites.userId=${userId} 
+    AND
+    storefavorites.storeId=${storeId}
+
+     
+    `;
+  
+    //const userId=  parseInt(req.query.userId);
+  
+    db.query(q, [userId, storeId], (err, data) => {
+  
+      if (err) {
+        console.log(err);
+        return res.json(err);
+      }
+  
+      return res.json(data);
+    });
+  });
+
 app.get("/getAllStores", (req, res) => {
 
   //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
-    const q = `SELECT * FROM store`;
+
+  const userId=  parseInt(req.query.userId);
+
+
+
   
-    const userId=  parseInt(req.query.userId);
+    const q = `SELECT store.storeId, store.storeName, store.storeLogoUrl, storefavorites.userId ,
+
+        store.storeFacebookUrl,
+        store.storeInstagramUrl,
+        store.storePhone,
+        store.storeAddress,
+        store.storeWebsite,
+
+       CASE 
+        WHEN storefavorites.userId=${userId} THEN true 
+        ELSE false 
+        END AS isFavorite
+
+    FROM store
+    
+    left join storefavorites on store.storeId = storefavorites.storeId
+
+    and storefavorites.userId = ${userId}
+    
+    `;
+  
+    //const userId=  parseInt(req.query.userId);
   
     db.query(q, [userId], (err, data) => {
   
@@ -459,10 +711,106 @@ app.get("/getAllStores", (req, res) => {
   });
 
 
+  // write the query so it returns the all the records from stores table and the isFavorite field is storeId is in the storefavorites table for the given userId
+
+
+
+
+
+
+  
+
+
+  
+
+  
+
+
+  app.get("/getStoreData", (req, res) => {
+
+    //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+  
+    const userId=  parseInt(req.query.userId);
+    const storeId=  parseInt(req.query.storeId);
+  
+  // why does the query above return duplicae records from the stores table?
+ 
+    
+      const q = `SELECT store.storeId, store.storeName, store.storeLogoUrl, storefavorites.userId ,
+  
+                  CASE 
+                    WHEN storefavorites.userId=${userId} THEN true 
+                    ELSE false 
+                    END AS isFavorite
+            
+                FROM store
+                
+                left join storefavorites on store.storeId = storefavorites.storeId
+   
+      
+      `;
+    
+      //const userId=  parseInt(req.query.userId);
+    
+      db.query(q, [userId], (err, data) => {
+    
+        if (err) {
+          console.log(err);
+          return res.json(err);
+        }
+    
+        return res.json(data);
+      });
+    });
+
+
+  app.get("/getAllBrands", (req, res) => {
+
+    //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+
+    console.log("getAllBrands userid:", req.query.userId);
+  
+    const userId=  parseInt(req.query.userId);
+  
+  
+    
+      const q = `SELECT brands.brandId, brands.brandName, brands.brandLogoUrl, brandfavorites.userId ,
+  
+  
+         CASE 
+          WHEN brandfavorites.userId=${userId} THEN true 
+          ELSE false 
+          END AS isFavorite
+  
+      FROM brands
+      
+      left join brandfavorites on brands.brandId = brandfavorites.brandId
+
+      and brandfavorites.userId = ${userId}
+    
+      `;
+    
+      //const userId=  parseInt(req.query.userId);
+    
+      db.query(q, [userId], (err, data) => {
+    
+        if (err) {
+          console.log(err);
+          return res.json(err);
+        }
+    
+        return res.json(data);
+      });
+    });
+
   app.get("/getUserFavoriteStores", (req, res) => {
 
     //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
-      const q = `SELECT userId, storeId FROM storeFavorites WHERE userId = ?`;
+      const q = `SELECT userId, storeId FROM storeFavorites 
+      
+      
+
+      WHERE userId = ?`;
     
       const userId=  parseInt(req.query.userId);
     
@@ -476,6 +824,25 @@ app.get("/getAllStores", (req, res) => {
         return res.json(data);
       });
     });
+
+
+    app.get("/getUserFavoriteBrands", (req, res) => {
+
+      //const q = "SELECT tableid,  users.id  FROM orders join users on orders.userid = users.id WHERE orders.status = 0 ";
+        const q = `SELECT userId, brandId FROM brands WHERE userId = ?`;
+      
+        const userId=  parseInt(req.query.userId);
+      
+        db.query(q, [userId], (err, data) => {
+      
+          if (err) {
+            console.log(err);
+            return res.json(err);
+          }
+      
+          return res.json(data);
+        });
+      });
 
 
 app.get("/getSubCategories", (req, res) => {
@@ -504,7 +871,7 @@ app.get("/checkIfUserNameExists", (req, res) => {
 
   //console.log("x",req.query.id);
 
-  const q = "SELECT count(*) as found FROM users WHERE userName = ? ";
+  const q = "SELECT userId as found FROM users WHERE userName = ? ";
   db.query(q, [username], (err, data) => {
 
 
@@ -615,13 +982,14 @@ app.post("/addUser", (req, res) => {
  
     const my = {errors:''}
     console.clear();
-    console.log("valuessssss111111");
-    const q = "INSERT INTO users(`userName`) VALUES (?)";
+    console.log("add user");
+    const q = "INSERT INTO users(`userName`,`expoPushToken`) VALUES (?)";
   
     const values = [
-      req.body.userName
+      req.body.userName,
+      req.body.expoPushToken
     ];
-    console.log(">>" + req.body.userName);
+    console.log(">> addUser:" + values);
    
     db.query(q, [values], (err, data) => {
   
@@ -631,6 +999,9 @@ app.post("/addUser", (req, res) => {
   });
 
 
+
+  
+  
   app.put("/updateUserEmail", (req, res) => {
 
     //convert string to number
@@ -707,6 +1078,34 @@ const my = {errors:''}
 });
 
 
+// write a post endpoint addBrandToFavorites that takes userId and brandId as parameters and adds the brand to the user's favorite brands
+app.post("/addBrandToFavorites", (req, res) => {
+ 
+  const my = {errors:''}
+  
+      //console.log("valuessssss111111")
+    const q = "INSERT INTO brandfavorites( `userId`, `brandId`) VALUES (?)";
+  
+    const values = [
+      req.body.userId,
+      req.body.brandId
+    ];
+  
+    const userId = req.body.userId
+  
+    console.log(">>" + req.body.userId);
+    console.log(">>" + req.body.brandId);
+    console.log(">>--" + req.method);
+  
+  
+  
+    db.query(q, [values], (err, data) => {
+  
+      if (err) return res.send(err);
+      return res.json(data);
+    });
+  });
+
 app.post("/addStoreToFavorites", (req, res) => {
  
   const my = {errors:''}
@@ -755,7 +1154,28 @@ app.post("/books", (req, res) => {
   });
 });
 
+//write a post endpoint addBrand that takes brandId and userId as parameters and removes the brand from the user's favorite brands
+app.delete("/removeBrandFromFavorites/:userId/:brandId", (req, res) => {
 
+//console.log("usersssss");
+
+const q = " DELETE FROM brandfavorites WHERE userId = ? and brandId = ? LIMIT 1";
+
+const userId = req.params.userId;
+const brandId = req.params.brandId;
+
+console.log("user",req.params.userId)
+
+db.query(q, [userId,brandId], (err, data) => {
+  if (err)
+  {
+    console.log("error",err)
+    return
+  }
+
+  return res.json(data);
+});
+});
 
 app.delete("/removeStoreFromFavorites/:userId/:storeId", (req, res) => {
 
@@ -825,6 +1245,8 @@ app.put("/update/:id", (req, res) => {
   });
 });
 
+
+
 app.listen(process.env.PORT, () => {
-  console.log("Connected to backend.");
+  console.log("Connected to backend.", process.env.PORT);
 });
