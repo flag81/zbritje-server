@@ -2,6 +2,8 @@
 import mysql from 'mysql2';
 
 
+
+
 const db = mysql.createPool({
   connectionLimit:4,
   host: "autorack.proxy.rlwy.net",
