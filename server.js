@@ -432,6 +432,7 @@ console.log("searchText", searchText);
   sales.discountPrice,
   sales.discountPercentage, 
   store.storeLogo as storeLogo,
+  store.storeLogoUrl as storeLogoUrl,
 
   CASE 
     WHEN f.userId = ${userId} THEN true 
