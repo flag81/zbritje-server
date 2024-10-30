@@ -480,7 +480,9 @@ LEFT JOIN storefavorites sf ON store.storeId = sf.storeId and sf.userId = ${user
     and 
 
   CASE 
-    WHEN ${searchText.length} > 2 THEN  INSTR(products.productName, ${searchText}) > 0
+    WHEN ${searchText.length} > 2 THEN  
+
+    products.productName REGEXP REPLACE(${searchText}, ' ', '|')
 
    
     ELSE true
