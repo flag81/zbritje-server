@@ -517,6 +517,8 @@ LEFT JOIN storefavorites sf ON store.storeId = sf.storeId and sf.userId = ${user
       return res.json(err);
     }
 
+    console.log(res.json(data));
+
     return res.json(data);
   });
 });
