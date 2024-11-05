@@ -7,9 +7,9 @@ import mysql from 'mysql2';
 const db = mysql.createPool({
   connectionLimit:4,
   host: "autorack.proxy.rlwy.net",
-  port: 59414,
+  port: 51504,
   user: "root",
-  password: "sVclMskbFgSLmFwJcrIxhUELEHhSKMQo",
+  password: "WQAbQaQZdMpXHhSuqQZRPoIIcufLPycF",
   database:"railway",
 });
 
