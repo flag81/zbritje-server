@@ -1255,5 +1255,5 @@ app.put("/update/:id", (req, res) => {
 
 
 app.listen(process.env.PORT, () => {
-  console.log("Connected to backend.", process.env.PORT);
+  console.log("Connected to backend.", process.env.PORT, process.env.TOKEN_SECRET);
 });
