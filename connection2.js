@@ -18,9 +18,9 @@ const db = mysql.createPool({
 const db = mysql.createPool({
   connectionLimit:4,
   host: "128.140.43.244",
-  port: 5432,
+  port: 51504,
   user: "mysql",
-  password: "qbWdiCuFkMWED1TiFp9oY8mHliu2AeHV0uYkgSKXNxR2T7Hx5y8OH6X5jFjdKQi7",
+  password: "u4BZPRXcHdt6MnFpgIq4K29gp6dTv1JM6B6ARiEa1apg0N6alUTfDgICG9o3wqjp",
   database:"default",
 });
 
