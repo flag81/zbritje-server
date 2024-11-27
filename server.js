@@ -3,6 +3,8 @@
 import express from "express";
 import cors from "cors";
 
+const cloudinary = require('cloudinary').v2;
+
 
 
 import db from './connection2.js';
@@ -42,6 +44,44 @@ app.use(express.static(__dirname));
 app.use(cookieParser());
 
 var session ;
+
+cloudinary.config({
+  cloud_name: 'your_cloud_name',
+  api_key: 'your_api_key',
+  api_secret: 'your_api_secret',
+});
+
+async function listAllMediaFiles() {
+  try {
+    const result = await cloudinary.api.resources({
+      type: 'upload',
+      max_results: 100,
+    });
+
+    // Prepare an array to hold media file details
+    const mediaFiles = result.resources.map((resource) => ({
+      public_id: resource.public_id,
+      format: resource.format,
+      secure_url: resource.secure_url,
+      thumbnail_url: cloudinary.url(resource.public_id, {
+        width: 100,    // Thumbnail width
+        height: 100,   // Thumbnail height
+        crop: 'thumb', // Thumbnail crop mode
+      }),
+    }));
+
+    return mediaFiles;
+
+  } catch (error) {
+    console.error('Error fetching media files:', error);
+    return { error: 'Error fetching media files' };
+  }
+};
+
+app.get('/media-library-json', async (req, res) => {
+  const mediaJson = await listAllMediaFiles();
+  res.json(mediaJson);
+});
 
 const auth = basicAuth({
   users: {
