@@ -3,7 +3,7 @@
 import express from "express";
 import cors from "cors";
 
-const cloudinary = require('cloudinary').v2;
+import { v2 as cloudinary } from 'cloudinary';
 
 
 
