@@ -130,7 +130,7 @@ app.post('/auth', (req, res) => {
 
 app.get("/", (req, res) => {
   //res.json("hello from backend ...");
-  res.sendFile(path.join(__dirname, 'index.jsx'));
+  res.sendFile(path.join(__dirname, 'index.html'));
 
 
 
