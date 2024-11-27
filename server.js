@@ -46,9 +46,9 @@ app.use(cookieParser());
 var session ;
 
 cloudinary.config({
-  cloud_name: 'your_cloud_name',
-  api_key: 'your_api_key',
-  api_secret: 'your_api_secret',
+  cloud_name: 'dt7a4yl1x',
+  api_key: '443112686625846',
+  api_secret: 'e9Hv5bsd2ECD17IQVOZGKuPmOA4',
 });
 
 async function listAllMediaFiles() {
