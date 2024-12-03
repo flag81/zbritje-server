@@ -537,7 +537,7 @@ LEFT JOIN storefavorites sf ON store.storeId = sf.storeId and sf.userId = ${user
 
 
 
-  order by isFavorite DESC,sales.saleEndDate DESC,
+  order by sales.saleEndDate DESC,isFavorite DESC,
   isStoreFavorite DESC,
   products.productId -- Added for stable sorting , need to be unique
   
