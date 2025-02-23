@@ -161,6 +161,11 @@ app.post('/save-preferences', authenticateJWT, (req, res) => {
 
   // code to insers the uerId into the users table field jwt 
 
+  
+  
+  // add code for api 
+
+
 
 
   res.json({ message: 'Preferences saved', userId, preferences });
@@ -374,6 +379,14 @@ app.put('/rename-image', async (req, res) => {
   catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+
+app.get('/test', async (req, res) => {
+
+  res.status(200).json({ message: 'Testing successfully....' });
+
+
 });
 
 
