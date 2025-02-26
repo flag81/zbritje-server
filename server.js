@@ -33,9 +33,11 @@ import webPush from 'web-push';
 app.use(express.json());
 
 const corsOptions = {
-  origin: 'http://localhost:5173', // Replace with your frontend's origin
+  origin: process.env.FRONTEND_URL , // Replace with your frontend's origin
   credentials: true, // Allow cookies to be sent with requests
 };
+
+console.log('corsOptions:', corsOptions);
 
 app.use(cors(corsOptions)); // Allow all origins, especially Vite's localhost:5173
 
