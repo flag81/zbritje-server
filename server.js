@@ -48,6 +48,40 @@ const SECRET_KEY = 'AAAA-BBBB-CCCC-DDDD-EEEE';
 
 const upload = multer({ dest: 'uploads/' }); // Define upload middleware
 
+async function listAllMediaFiles() {
+  try {
+    const result = await cloudinary.api.resources({
+      type: 'upload',
+      max_results: 100,
+    });
+
+    // Prepare an array to hold media file details
+    const mediaFiles = result.resources.map((resource) => ({
+      public_id: resource.public_id,
+      format: resource.format,
+      secure_url: resource.secure_url,
+      thumbnail_url: cloudinary.url(resource.public_id, {
+        width: 100,    // Thumbnail width
+        height: 100,   // Thumbnail height
+        crop: 'thumb', // Thumbnail crop mode
+      }),
+    }));
+
+    return mediaFiles;
+
+  } catch (error) {
+    console.error('Error fetching media files:', error);
+    return { error: 'Error fetching media files' };
+  }
+};
+
+cloudinary.config({
+  cloud_name: 'dt7a4yl1x',
+  api_key: '443112686625846',
+  api_secret: 'e9Hv5bsd2ECD17IQVOZGKuPmOA4',
+});
+
+
 
 function generateJwtToken(payload, expiresIn = '240h') {
   return jwt.sign(payload, SECRET_KEY, { expiresIn });
