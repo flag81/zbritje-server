@@ -105,6 +105,11 @@ function authenticateJWT(req, res, next) {
   }
 }
 
+app.get('/media-library-json', async (req, res) => {
+  const mediaJson = await listAllMediaFiles();
+  res.json(mediaJson);
+});
+
 // Route to set JWT cookie for a new user or returning user without a token
 app.get('/initialize', (req, res) => {
 
