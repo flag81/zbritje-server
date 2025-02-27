@@ -33,7 +33,7 @@ import webPush from 'web-push';
 app.use(express.json());
 
 const corsOptions = {
-  origin: process.env.FRONTEND_URL , // Replace with your frontend's origin
+  origin: [process.env.FRONTEND_URL, 'http://localhost:5173'] , // Replace with your frontend's origin
   credentials: true, // Allow cookies to be sent with requests
 };
 
