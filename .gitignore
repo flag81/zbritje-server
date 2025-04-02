@@ -13,6 +13,7 @@ dist-ssr
 *.local
 *.jpg
 .env
+vision-ai-455010-d952b6232600.json
 
 # Editor directories and files
 .vscode/*

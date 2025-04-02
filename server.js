@@ -1762,6 +1762,23 @@ app.put("/editProductDescription", (req, res) => {
 }
 );
 
+
+app.put("/editStore", (req, res) => {
+  
+  const { productId, storeId } = req.body;
+
+  const q = `UPDATE products SET storeId = ? WHERE productId = ?`;
+
+  db.query(q, [storeId, productId], (err, result) => {
+    if (err) {
+      console.error('Error updating store :', err);
+      return res.status(500).json({ error: 'Failed to update store' });
+    }
+    res.status(200).json({ message: 'Store updated successfully' });
+  }
+  );
+}
+);
 //update getProducts endpoint to order the results by keyword count matches between the keywords of the favorite products and the keywords of the products in the database descending
 
 app.get("/getProducts", async (req, res) => {
