@@ -1024,6 +1024,13 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
     // Upload image to Cloudinary
     const uploadedImage = await cloudinary.uploader.upload(imagePath, {
       folder: 'uploads',
+
+      // keep the original file name
+      public_id: req.file.originalname.split('.')[0], // Remove file extension
+      resource_type: 'image',
+      overwrite: true, // Overwrite if exists
+      
+
     });
 
     console.log('✅ Image uploaded to Cloudinary:', uploadedImage.secure_url);
