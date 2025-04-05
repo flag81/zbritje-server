@@ -631,6 +631,7 @@ const corsOptions = {
   origin: [process.env.FRONTEND_URL, process.env.FRONTEND_URL2,
     'http://localhost:5173', 
     'http://localhost:5173/dashboard', 
+    'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
     'https://singular-catfish-deciding.ngrok-free.app'] , // Replace with your frontend's origin
   credentials: true, // Allow cookies to be sent with requests
   methods: ["GET", "POST", "PUT", "DELETE"], // Allow all standard methods
