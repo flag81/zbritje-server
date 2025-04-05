@@ -1,8 +1,77 @@
-import express from 'express';
+
 import multer from 'multer';
 import cloudinary from './cloudinaryConfig.js';
 import cors from 'cors';
 import fs from 'fs';
+import dotenv from 'dotenv';
+
+
+dotenv.config();
+
+import express from 'express';
+
+import { fileURLToPath } from "url";
+import path from "path";
+
+import vision from '@google-cloud/vision';
+
+//const { VertexAI } = require('@google-cloud/vertexai');
+
+// convert above to import
+
+
+
+ 
+
+//keyFilename: path.join(__dirname, './vision-ai-455010-d952b6232600.json'), // Replace with your key file path
+
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const keyFilePath = path.join(__dirname, './vision-ai-455010-d952b6232600.json');
+
+process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
+
+if (!fs.existsSync(keyFilePath)) {
+  console.error('❌ Key file not found:', keyFilePath);
+ 
+}
+else {
+
+  console.log('✅ Key file found:', keyFilePath);
+}
+
+const credentials = JSON.parse(fs.readFileSync(keyFilePath, 'utf8'));
+
+
+
+import { VertexAI } from '@google-cloud/vertexai';
+
+const vertexAI = new VertexAI({project: 'vision-ai-455010', location: 'us-central1'}); // Replace with your project and location
+
+  // check if key file exists and load it
+
+  console.log('✅ VertexAI client initialized in server.js'); // Add this
+
+
+
+
+
+  console.log('Attempting to load key file from:', keyFilePath);
+
+
+
+// Load private key for Apple authentication
+const privateKeyPath = path.join(__dirname, "./AuthKey_6YK9NFRYH9.p8"); // Path to your .p8 key file
+const privateKey = fs.readFileSync(privateKeyPath, "utf8");
+
+//console.log('privateKey:', privateKey);
+
+const client = new vision.ImageAnnotatorClient({
+  keyFilename: path.join(__dirname, './vision-ai-455010-d952b6232600.json'), // Replace with your key file path
+});
+
 
 import { format } from 'path';
 import db from './connection.js';
@@ -10,10 +79,7 @@ import db from './connection.js';
 import cookieParser from 'cookie-parser';
 import bodyParser from'body-parser';
 
-
-
-
-
+import AppleSigninAuth from 'apple-signin-auth';
 
 import OpenAI from "openai";
 const openai = new OpenAI();
@@ -23,19 +89,726 @@ import download from 'image-downloader';
 export const app = express();
 
 
-import Tesseract from 'tesseract.js';
-
 import jwt from 'jsonwebtoken';
 
 import webPush from 'web-push';
 
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+import { Strategy as AppleStrategy } from 'passport-apple';
+
+import session from 'express-session';
+import axios from "axios";
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // Supports form data parsing
+
+
+
+app.use((req, res, next) => {
+  res.setHeader("Content-Security-Policy",
+    "script-src 'self' https://singular-catfish-deciding.ngrok-free.app https://www.apple.com https://appleid.cdn-apple.com https://idmsa.apple.com https://gsa.apple.com https://idmsa.apple.com.cn https://signin.apple.com;"
+  );
+  next();
+});
+
+app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUninitialized: true , 
+
+  cookie: { 
+    maxAge: 5 * 60 * 1000, // Set session duration
+    secure: process.env.NODE_ENV === 'production', // Set secure cookies in production
+  }
+
+
+
+}));
+
+
+passport.use(
+  new GoogleStrategy(
+      {
+          clientID: process.env.GOOGLE_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+          callbackURL: "http://localhost:3000/auth/google/callback",
+          passReqToCallback: true,
+      },
+      (req, accessToken, refreshToken, profile, done) => {
+          return done(null, profile);
+      }
+  )
+);
+
+
+// Serialize and deserialize user (use sessions)
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((obj, done) => done(null, obj));
+
+// Initialize passport and session middleware
+app.use(passport.initialize());
+app.use(passport.session());
+
+
+
+
+// Apple Sign-In Route
+app.get(
+  "/auth/apple222",
+  passport.authenticate("apple", { scope: ["email", "name"] }),
+
+  (req, res) => {
+    console.log("🍏 Apple OAuth Callback Triggered");
+  }
+  
+);
+
+// Apple Sign-In Route (Redirects to Apple Auth)
+app.get("/auth/apple44444", (req, res) => {
+  const appleRedirectUrl = `https://appleid.apple.com/auth/authorize?response_type=code%20id_token&client_id=${process.env.APPLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.APPLE_CALLBACK_URL)}&scope=name%20email&response_mode=form_post`;
+  res.redirect(appleRedirectUrl);
+});
+
+
+
+
+
+const generateAppleClientSecret = () => {
+  const now = Math.floor(Date.now() / 1000);
+  return jwt.sign(
+    {
+      iss: process.env.APPLE_TEAM_ID,
+      iat: now,
+      exp: now + 15777000, // Token valid for 6 months
+      aud: "https://appleid.apple.com",
+      sub: process.env.APPLE_CLIENT_ID,
+    },
+    privateKey,
+    
+    {
+      algorithm: "ES256",
+      keyid: process.env.APPLE_KEY_ID,
+    }
+  );
+};
+
+
+
+
+app.post("/auth/apple", async (req, res) => {
+  try {
+    const { code } = req.body;
+
+    const clientSecret = generateAppleClientSecret();
+
+    const appleResponse = await AppleSigninAuth.getAuthorizationToken(code, {
+      clientID: process.env.APPLE_CLIENT_ID,
+      clientSecret: clientSecret,
+      redirectURI: process.env.APPLE_CALLBACK_URL,
+    });
+
+    const decodedToken = jwt.decode(appleResponse.id_token);
+    
+    res.json({ user: decodedToken, accessToken: appleResponse.access_token });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Apple Sign-in failed" });
+  }
+});
+
+// **Apple Callback Handler**
+app.post("/auth/apple/callback", async (req, res) => {
+  try {
+    console.log("🍏 Apple OAuth Callback Triggered");
+
+    const { code, id_token } = req.body;
+
+    if (!code && !id_token) {
+      console.error("❌ No authorization code or ID token received.");
+      return res.status(400).json({ error: "Missing Apple authorization data" });
+    }
+
+    let decodedToken;
+
+    // If ID token is available, decode it directly (short path)
+    if (id_token) {
+      decodedToken = jwt.decode(id_token);
+    } else {
+      // Exchange the authorization code for an access token
+      const clientSecret = generateAppleClientSecret();
+      const appleResponse = await axios.post("https://appleid.apple.com/auth/token", null, {
+        params: {
+          client_id: process.env.APPLE_CLIENT_ID,
+          client_secret: clientSecret,
+          code: code,
+          grant_type: "authorization_code",
+          redirect_uri: process.env.APPLE_CALLBACK_URL,
+        },
+      });
+
+      if (!appleResponse.data.id_token) {
+        console.error("❌ Failed to retrieve Apple ID token.");
+        return res.status(400).json({ error: "Failed to authenticate with Apple" });
+      }
+
+      decodedToken = jwt.decode(appleResponse.data.id_token);
+    }
+
+    if (!decodedToken) {
+      console.error("❌ Failed to decode Apple ID token.");
+      return res.status(400).json({ error: "Invalid Apple ID token" });
+    }
+
+    const appleId = decodedToken.sub; // Apple's unique user identifier
+    let email = decodedToken.email || null; // Email may be missing
+
+    console.log(`🍏 Received AppleID: ${appleId}, Email: ${email || "No email provided"}`);
+
+    // **Step 1: Check if the user exists in the database**
+    const checkQuery = `SELECT userId, email FROM users WHERE userId = ? OR email = ?`;
+    db.query(checkQuery, [appleId, email], (err, results) => {
+      if (err) {
+        console.error("❌ Database error:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      if (results.length > 0) {
+        // ✅ **Existing user found**
+        const existingUser = results[0];
+        console.log(`✅ Existing user found: userId=${existingUser.userId}, email=${existingUser.email || "No email"}`);
+
+        // **Step 2: Update email if missing**
+        if (!existingUser.email && email) {
+          const updateQuery = `UPDATE users SET email = ? WHERE userId = ?`;
+          db.query(updateQuery, [email, existingUser.userId], (updateErr) => {
+            if (updateErr) {
+              console.error("❌ Error updating email:", updateErr);
+              return res.status(500).json({ error: "Failed to update email" });
+            }
+            console.log(`✅ Email updated for userId=${existingUser.userId}`);
+          });
+        }
+
+        // **Step 3: Generate JWT for existing user**
+        const token = jwt.sign(
+          { userId: existingUser.userId, email: existingUser.email || email },
+          process.env.TOKEN_SECRET,
+          { expiresIn: "7d" }
+        );
+
+        res.cookie("jwt", token, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "None",
+          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
+
+
+        return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
+      } else {
+        // 🆕 **New user - Insert into database**
+        console.log(`🆕 New user detected, inserting: ${email || "No email provided"} and AppleID: ${appleId}`);
+
+        const insertQuery = `INSERT INTO users (userName, email) VALUES (?, ?)`;
+        db.query(insertQuery, [appleId, email], (insertErr) => {
+          if (insertErr) {
+            console.error("❌ Error inserting new user:", insertErr);
+            return res.status(500).json({ error: "Failed to insert new user" });
+          }
+
+          console.log(`✅ New user inserted: AppleID=${appleId}, Email=${email || "No email"}`);
+
+          // **Step 4: Generate JWT for new user**
+          const token = jwt.sign(
+            { userId: appleId, email },
+            process.env.TOKEN_SECRET,
+            { expiresIn: "7d" }
+          );
+
+          res.cookie("jwt", token, {
+            httpOnly: true,
+            secure:true,
+            sameSite: "None",
+            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+          });
+
+
+          return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
+        });
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Apple OAuth Error:", error);
+    return res.status(500).json({ error: "Apple authentication failed" });
+  }
+});
+
+app.post("/auth/apple/callback121212", async (req, res) => {
+
+
+
+  try {
+
+    console.log("🍏 Apple OAuth Callback Triggered");
+    const { code, id_token } = req.body;
+  
+    if (!code && !id_token) {
+      console.error("❌ No authorization code or ID token received.");
+      return res.status(400).json({ error: "No authorization code provided" });
+    }
+
+
+    const clientSecret = generateAppleClientSecret();
+
+    const appleResponse = await AppleSigninAuth.getAuthorizationToken(code, {
+      clientID: process.env.APPLE_CLIENT_ID,
+      clientSecret: clientSecret,
+      redirectURI: process.env.APPLE_CALLBACK_URL,
+    });
+
+    const decodedToken = jwt.decode(appleResponse.id_token);
+
+    // extract email and Apple ID
+    const appleId = decodedToken.sub;
+    const email = decodedToken.email || null;
+    
+    res.json({ user: decodedToken, accessToken: appleResponse.access_token });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Apple Sign-in failed" });
+  }
+});
+
+
+app.post("/auth/apple/callback33", async (req, res) => {
+  try {
+      console.log("🍏 Apple OAuth Callback Triggered");
+
+      const { id_token } = req.body; // Apple sends `id_token`
+      if (!id_token) {
+          console.error("❌ No ID token received.");
+          return res.status(400).json({ error: "Missing ID token" });
+      }
+
+      // Fetch Apple's public keys for verification
+      const appleKeys = await axios.get("https://appleid.apple.com/auth/keys");
+      const applePublicKeys = appleKeys.data.keys;
+
+      // Decode JWT header to get the key ID
+      const decodedHeader = jwt.decode(id_token, { complete: true });
+      if (!decodedHeader) {
+          console.error("❌ Failed to decode Apple ID token.");
+          return res.status(400).json({ error: "Invalid ID token" });
+      }
+
+      // Find the matching key
+      const key = applePublicKeys.find(k => k.kid === decodedHeader.header.kid);
+      if (!key) {
+          console.error("❌ No matching Apple key found.");
+          return res.status(400).json({ error: "Invalid Apple key" });
+      }
+
+      // Verify ID Token
+      const verifiedPayload = jwt.verify(id_token, jwt.jwkToPem(key), { algorithms: ["RS256"] });
+      console.log("✅ Apple ID Token Verified:", verifiedPayload);
+
+      const appleId = verifiedPayload.sub; // Apple's unique user identifier
+      let email = verifiedPayload.email || null; // Email may be missing
+
+      console.log(`🍏 Received AppleID: ${appleId}, Email: ${email || "No email provided"}`);
+
+      // Check if the user already exists in the database
+      const checkQuery = `SELECT userId, email FROM users WHERE userId = ? OR email = ?`;
+      db.query(checkQuery, [appleId, email], (err, results) => {
+          if (err) {
+              console.error("❌ Database error:", err);
+              return res.status(500).json({ error: "Database error" });
+          }
+
+          if (results.length > 0) {
+              // ✅ Existing user found
+              const existingUser = results[0];
+              console.log(`✅ Existing user found: userId=${existingUser.userId}, email=${existingUser.email || "No email"}`);
+
+              // If email is missing, update it
+              if (!existingUser.email && email) {
+                  const updateQuery = `UPDATE users SET email = ? WHERE userId = ?`;
+                  db.query(updateQuery, [email, existingUser.userId], (updateErr) => {
+                      if (updateErr) {
+                          console.error("❌ Error updating email:", updateErr);
+                          return res.status(500).json({ error: "Failed to update email" });
+                      }
+                      console.log(`✅ Email updated for userId=${existingUser.userId}`);
+                  });
+              }
+
+              // Generate JWT for existing user
+              const token = jwt.sign(
+                  { userId: existingUser.userId, email: existingUser.email || email },
+                  process.env.TOKEN_SECRET,
+                  { expiresIn: "7d" }
+              );
+
+              res.cookie("jwt", token, {
+                  httpOnly: true,
+                  secure: true,
+                  sameSite: "None",
+                  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+              });
+
+              return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
+          } else {
+              // 🆕 New user - Insert into database
+              console.log(`🆕 New user detected, inserting: ${email || "No email provided"}`);
+
+              const insertQuery = `INSERT INTO users (userId, email) VALUES (?, ?)`;
+              db.query(insertQuery, [appleId, email], (insertErr) => {
+                  if (insertErr) {
+                      console.error("❌ Error inserting new user:", insertErr);
+                      return res.status(500).json({ error: "Failed to insert new user" });
+                  }
+
+                  console.log(`✅ New user inserted: AppleID=${appleId}, Email=${email || "No email"}`);
+
+                  // Generate JWT for new user
+                  const token = jwt.sign({ userId: appleId, email }, process.env.TOKEN_SECRET, { expiresIn: "7d" });
+
+                  res.cookie("jwt", token, {
+                      httpOnly: true,
+                      secure: true,
+                      sameSite: "None",
+                      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+                  });
+
+                  return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
+              });
+          }
+      });
+
+  } catch (error) {
+      console.error("❌ Apple OAuth Error:", error);
+      return res.status(500).json({ error: "Apple authentication failed" });
+  }
+});
+
+
+app.post("/auth/apple/callback222", async (req, res) => {
+    try {
+        console.log("🍏 Apple OAuth Callback Triggered");
+
+        const { id_token } = req.body; // Apple sends `id_token`
+
+        if (!id_token) {
+            console.error("❌ No ID token received from Apple.");
+            return res.status(400).json({ error: "Missing ID token" });
+        }
+
+        // Fetch Apple's public keys
+        const appleKeys = await axios.get("https://appleid.apple.com/auth/keys");
+        const applePublicKeys = appleKeys.data.keys;
+
+        // Decode the JWT header to get the `kid`
+        const decodedHeader = jwt.decode(id_token, { complete: true });
+        if (!decodedHeader) {
+            console.error("❌ Failed to decode Apple ID token.");
+            return res.status(400).json({ error: "Invalid ID token" });
+        }
+
+        // Find the matching key
+        const key = applePublicKeys.find(k => k.kid === decodedHeader.header.kid);
+        if (!key) {
+            console.error("❌ Matching Apple key not found.");
+            return res.status(400).json({ error: "Invalid key" });
+        }
+
+        // Verify the ID token
+        const verifiedPayload = jwt.verify(id_token, jwt.jwkToPem(key), { algorithms: ["RS256"] });
+
+        console.log("✅ Apple ID Token Verified:", verifiedPayload);
+
+        const appleId = verifiedPayload.sub; // Apple's unique user identifier
+        let email = verifiedPayload.email || null; // Email may be missing
+
+        console.log(`🍏 Received AppleID: ${appleId}, Email: ${email || "No email provided"}`);
+
+        // Check if the user already exists
+        const checkQuery = `SELECT userId, email FROM users WHERE userId = ? OR email = ?`;
+        db.query(checkQuery, [appleId, email], (err, results) => {
+            if (err) {
+                console.error("❌ Database error:", err);
+                return res.status(500).json({ error: "Database error" });
+            }
+
+            if (results.length > 0) {
+                // ✅ Existing user found
+                const existingUser = results[0];
+                console.log(`✅ Existing user found: userId=${existingUser.userId}, email=${existingUser.email || "No email"}`);
+
+                // If email is missing, update it
+                if (!existingUser.email && email) {
+                    const updateQuery = `UPDATE users SET email = ? WHERE userId = ?`;
+                    db.query(updateQuery, [email, existingUser.userId], (updateErr) => {
+                        if (updateErr) {
+                            console.error("❌ Error updating email:", updateErr);
+                            return res.status(500).json({ error: "Failed to update email" });
+                        }
+                        console.log(`✅ Email updated for userId=${existingUser.userId}`);
+                    });
+                }
+
+                // Generate JWT for existing user
+                const token = jwt.sign(
+                    { userId: existingUser.userId, email: existingUser.email || email },
+                    process.env.TOKEN_SECRET,
+                    { expiresIn: "7d" }
+                );
+
+                res.cookie("jwt", token, {
+                    httpOnly: true,
+                    secure: true,
+                    sameSite: "None",
+                    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+                });
+
+                return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
+            } else {
+                // 🆕 New user - Insert into database
+                console.log(`🆕 New user detected, inserting: ${email || "No email provided"}`);
+
+                const insertQuery = `INSERT INTO users (userId, email) VALUES (?, ?)`;
+                db.query(insertQuery, [appleId, email], (insertErr) => {
+                    if (insertErr) {
+                        console.error("❌ Error inserting new user:", insertErr);
+                        return res.status(500).json({ error: "Failed to insert new user" });
+                    }
+
+                    console.log(`✅ New user inserted: AppleID=${appleId}, Email=${email || "No email"}`);
+
+                    // Generate JWT for new user
+                    const token = jwt.sign({ userId: appleId, email }, process.env.TOKEN_SECRET, { expiresIn: "7d" });
+
+                    res.cookie("jwt", token, {
+                        httpOnly: true,
+                        secure: true,
+                        sameSite: "None",
+                        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+                    });
+
+                    return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
+                });
+            }
+        });
+
+    } catch (error) {
+        console.error("❌ Apple OAuth Error:", error);
+        return res.status(500).json({ error: "Apple authentication failed" });
+    }
+});
+
+
+
+
+
+// Specify the model you want to use (e.g., Gemini 1.5 Pro)
+const model = 'gemini-1.5-pro-002'; // or gemini-1.0-pro if you prefer
+
+// Access the generative model
+const generativeModel = vertexAI.getGenerativeModel({
+    model: model,
+    generation_config: {
+        temperature: 0.2,  // Adjust temperature for creativity
+        topP: 0.8,
+        topK: 40,
+        maxOutputTokens: 1024 // adjust as needed
+    },
+});
+
+
+
+// Apple Callback Route
+
 
 const corsOptions = {
-  origin: [process.env.FRONTEND_URL, 'http://localhost:5173'] , // Replace with your frontend's origin
+  origin: [process.env.FRONTEND_URL, process.env.FRONTEND_URL2,
+    'http://localhost:5173', 
+    'http://localhost:5173/dashboard', 
+    'https://singular-catfish-deciding.ngrok-free.app'] , // Replace with your frontend's origin
   credentials: true, // Allow cookies to be sent with requests
+  methods: ["GET", "POST", "PUT", "DELETE"], // Allow all standard methods
+  allowedHeaders: ["Content-Type", "Authorization"], // Allow necessary headers
 };
+
+
+
+async function  insertProducts1(jsonData) {
+
+  console.log('Insert products endpoint hit');
+
+  // how to clean the jsonData from the special characters that are not part of json format
+
+  // jsonData = jsonData.replace(/[^a-zA-Z0-9\s.,:;{}[\]"']/g, ''); // Remove special characters
+
+// how to resolve this issue with jsonData not being a valid json format, and how to convert it to a valid json format
+
+//   jsonData = jsonData.replace(/([a-zA-Z0-9]+):/g, '"$1":'); // Add quotes around keys
+
+
+// resove this error with jsonData : SyntaxError: Unexpected token '`', "```json
+
+jsonData = jsonData.replace(/`/g, ''); // Remove backticks
+
+  jsonData = jsonData.replace(/```json/g, ''); // Remove code block markers
+
+  jsonData = jsonData.replace(/```/g, ''); // Remove code block markers
+
+  jsonData = jsonData.replace(/\\n/g, ''); // Remove new line characters
+
+  // how to remove parts like - ```json  ```
+  
+  jsonData = jsonData.replace(/```/g, ''); // Remove code block markers
+
+  jsonData = jsonData.replace(/json/g, ''); // Remove code block markers
+
+
+
+
+
+  const products = JSON.parse(jsonData); // Parse the JSON data
+
+  console.log('Products received:', products);
+
+  if (!Array.isArray(products)) {
+
+    console.error('Invalid JSON format:', products);
+
+    return;
+  }
+
+  const dbQuery = (query, params) => {
+    return new Promise((resolve, reject) => {
+      db.query(query, params, (err, result) => {
+        if (err) {
+          return reject(err);
+        }
+        resolve(result);
+      });
+    });
+  };
+
+  try {
+    await dbQuery('START TRANSACTION');
+
+    // Loop through each product
+    for (const product of products) {
+      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url } = product;
+      console.log('Processing product:', product_description);
+
+      const productResult = await dbQuery(
+        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url]
+      );
+
+      const productId = productResult.insertId;
+      console.log('Inserted productId:', productId);
+
+      // Ensure keywords is an array
+      if (!Array.isArray(keywords)) {
+        console.log('Keywords is not an array:', keywords);
+        throw new Error('Keywords must be an array');
+      }
+
+      for (const keyword of keywords) {
+        const keywordResult = await dbQuery(
+          `INSERT INTO keywords (keyword) VALUES (?) 
+          ON DUPLICATE KEY UPDATE keywordId = LAST_INSERT_ID(keywordId)`,
+          [keyword]
+        );
+
+        const keywordId = keywordResult.insertId;
+
+        await dbQuery(
+          `INSERT INTO productkeywords (productId, keywordId) VALUES (?, ?)`,
+          [productId, keywordId]
+        );
+      }
+    }
+
+    await dbQuery('COMMIT');
+
+    console.log('All products and keywords inserted successfully!');
+
+
+
+  } catch (err) {
+    console.error('Error during product insertion:', err);
+
+    await dbQuery('ROLLBACK');
+    //res.status(500).json({ error: 'Failed to insert products and keywords' });
+    console.error('Transaction rolled back due to error:', err);
+
+  }
+};
+
+
+
+
+async function formatDataToJson(textData, image_url) {
+
+
+  console.log('🔍 Formatting text data into JSON...');
+
+  const geminiPrompt = 'Can you format the text data given, about product sale information in albanian language from this sales flyer data for each product' +
+  ' Convert ë letter to e for all the keywords. Do not include conjunctions, articles words in Albanian language, in keywords.\n' +
+   ' Do not include size info for keywords but only for description , and only words with more than 2 characters include as keywords, \n' + 
+  
+   ' Do not show euro and percetage symbols. The storeId is the number that starts with @ sign , if available, but  do not include the @ sign  \n' + 
+   
+    `Text Data: ${textData}` +
+
+    `The image url is: ${image_url}` +
+  
+   
+    'The response should be in the JSON format for each product as object in an array of objects: \n' +
+    `[
+  
+      {
+        "product_description": "",
+        "old_price": "",
+        "new_price": "",
+        "discount_percentage": "",
+        "sale_end_date": "YYYY-MM-DD",
+        "storeId": 1,
+        "userId": 1,
+        "image_url": "",
+        "keywords": ["keyword1", "keyword2"]
+  }]` +
+  ' Replace the placeholder data in the example with extracted and given data, if available. \n' ;
+
+  
+
+
+  try {
+      const response = await generativeModel.generateContent(geminiPrompt);
+      const text = response.response.candidates[0].content.parts[0].text;
+      console.log('Raw Output:', text); // Log raw output to inspect
+
+      await insertProducts1(text); // Call the insert function with the text data
+
+      // try {
+      //     const jsonObject = JSON.parse(text);
+      //     return jsonObject;
+      // } catch (parseError) {
+      //     console.error('JSON Parsing Error:', parseError);
+      //     console.error('Failed JSON Text:', text); // Log the failed JSON string
+      //     return null; // Or throw an error if you prefer
+      // }
+
+  } catch (error) {
+      console.error('Gemini API Error:', error);
+      return null; // Or throw an error
+  }
+}
+
 
 console.log('corsOptions:', corsOptions);
 
@@ -44,9 +817,271 @@ app.use(cors(corsOptions)); // Allow all origins, especially Vite's localhost:51
 app.use(cookieParser());
 app.use(bodyParser.json());
 
+
+
+import authRoutes from "./routes/authRoutes.js"; // Import authentication routes
+app.use("/auth", authRoutes);
+
+
+const verifyToken = (req, res, next) => {
+  const token = req.cookies.jwt; // Assuming JWT is stored in 'jwt' cookie
+  if (!token) {
+    return res.status(403).send('A token is required for authentication');
+  }
+
+  try {
+    // Verify the token and extract user data
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;  // Attach decoded token (user data) to the request
+  } catch (err) {
+    return res.status(401).send('Invalid token');
+  }
+  return next();
+};
+
+
+
+
+
+app.post('/dashboardLogin', (req, res) => {
+  const { username, password } = req.body;
+
+  console.log('🔒 Login attempt:', username);
+
+  console.log('🔒 Password:' , password) ;
+
+  const query = 'SELECT * FROM users WHERE userName = ? AND password = ?';
+  db.query(query, [username, password], (err, results) => {
+    if (err) return res.status(500).json({ message: 'Server error' });
+    if (results.length > 0) {
+      const user = results[0];
+
+      console.log('🔒 User found:', user.userName);
+
+      res.json({ user: { userId: user.userId, userName: user.userName } });
+    } else {
+      res.status(401).json({ message: 'Invalid username or password' });
+    }
+  });
+});
+
+app.get("/check-session", (req, res) => {
+  const token = req.cookies.jwt; // Get JWT from cookies
+
+  if (!token) {
+      return res.json({ isLoggedIn: false, userId: null });
+  }
+
+  try {
+      const decoded = jwt.verify(token, process.env.TOKEN_SECRET); // Verify JWT
+
+      const query = `SELECT userId, email FROM users WHERE userId = ?`;
+      db.query(query, [decoded.userId], (err, results) => {
+          if (err) {
+              console.error("❌ Error retrieving user:", err);
+              return res.status(500).json({ isLoggedIn: false, userId: null });
+          }
+
+          if (results.length === 0) {
+              console.warn("⚠️ User not found in database");
+              return res.json({ isLoggedIn: false, userId: null });
+          }
+
+          res.json({ isLoggedIn: true, userId: results[0].userId, email: results[0].email });
+      });
+
+  } catch (error) {
+      console.error("❌ Invalid JWT:", error.message);
+      res.clearCookie("jwt"); // Remove invalid JWT
+      return res.json({ isLoggedIn: false, userId: null });
+  }
+});
+
+
+
+app.get('/auth/google',
+  passport.authenticate('google', { scope: ['profile', 'email'] }));
+
+
+
+  app.get("/auth/google/callback", passport.authenticate("google", { failureRedirect: "/" }), (req, res) => {
+    console.log("Google OAuth Callback Triggered");
+
+    console.log("Cookies received:", req.cookies); // Log cookies to debug
+
+    const token = req.cookies.jwt; // Get JWT token from cookies
+
+    if (!token) {
+        console.error("⚠️ No JWT token found in cookies.");
+        return res.status(400).json({ error: "JWT token is missing" });
+    }
+
+    try {
+        // ✅ Fix: Use TOKEN_SECRET for verification
+        console.log("Using TOKEN_SECRET for verification:", process.env.TOKEN_SECRET);
+        const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
+
+        console.log("✅ Decoded Token:", decoded);
+
+        const userId = decoded.userId;
+        const email = req.user.emails[0].value;
+
+        console.log(`Updating email for userId: ${userId}, New Email: ${email}`);
+
+        const query = `UPDATE users SET email = ? WHERE userId = ?`;
+
+        db.query(query, [email, userId], (err, result) => {
+            if (err) {
+                console.error("❌ Error updating user email:", err);
+                return res.status(500).json({ error: "Database error" });
+            }
+
+            res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
+        });
+
+    } catch (err) {
+        console.error("❌ JWT Verification Error:", err.message);
+        return res.status(401).json({ error: "Invalid token" });
+    }
+});
+
+
+
+  app.get("/auth/google/callback3", passport.authenticate("google", { failureRedirect: "/" }), (req, res) => {
+
+
+    console.log("Cookies received:", req.cookies); // Log all cookies
+
+    // Successful authentication, redirect home.
+    const token = req.cookies.jwt; // Get JWT token stored in cookies
+
+    console.log("Token received:", token);
+
+    const email = req.user.emails[0].value; // Extract email
+    const googleId = req.user.id; // Extract Google ID
+    const name = req.user.displayName; // Extract Full Name
+
+    if (!token) {
+        return res.status(400).json({ error: "JWT token is missing" });
+    }
+
+    console.log("Received Token:", token);
+console.log("Decoded Token:", jwt.decode(token));
+
+    try {
+      const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
+      console.log("Decoded Token:", decoded);
+  } catch (err) {
+      console.error("JWT Verification Error:", err.message);
+  }
+
+    try {
+
+      console.log("JWT Secret Key:", process.env.TOKEN_SECRET);
+
+        const decoded = jwt.verify(token, process.env.TOKEN_SECRET); // Verify JWT token
+        const userId = decoded.userId;
+
+        console.log("✅ Decoded Token:", decoded);
+
+        console.log("User ID from JWT:", userId);
+
+        const query = `UPDATE users SET email = ? WHERE userId = ?`;
+
+        db.query(query, [email, userId], (err, result) => {
+            if (err) {
+                console.error("Error updating user email:", err);
+                return res.status(500).json({ error: "Database error" });
+            }
+
+            res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`); // Redirect to frontend
+        });
+
+    } catch (err) {
+
+      console.error("❌ JWT Verification Error:", err.message);
+        return res.status(401).json({ error: "Invalid token" });
+    }
+});
+
+
+
 const SECRET_KEY = 'AAAA-BBBB-CCCC-DDDD-EEEE';
 
 const upload = multer({ dest: 'uploads/' }); // Define upload middleware
+
+
+app.post('/extract-text', upload.single('image'), async (req, res) => {
+  console.log('🔍 Extracting text from image...');
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file provided.' });
+    }
+
+    const imagePath = req.file.path;
+
+    // Upload image to Cloudinary
+    const uploadedImage = await cloudinary.uploader.upload(imagePath, {
+      folder: 'uploads',
+
+      // keep the original file name
+      public_id: req.file.originalname.split('.')[0], // Remove file extension
+      resource_type: 'image',
+      overwrite: true, // Overwrite if exists
+
+
+    });
+
+    console.log('✅ Image uploaded to Cloudinary:', uploadedImage.secure_url);
+
+    // Send image to Google Vision API
+    const [result] = await client.textDetection(uploadedImage.secure_url);
+    const detections = result.textAnnotations;
+    let extractedText = '';
+
+    if (detections && detections.length > 0) {
+      extractedText = detections[0].description;
+    }
+
+
+    console.log('🔍 Extracted text:', extractedText);
+   
+
+    const jsonText = await formatDataToJson(extractedText, uploadedImage.secure_url);
+
+
+    console.log('🔍 Formated json data:', jsonText);
+    
+    // --- START: Simplified Gemini API Call (Moved Here) ---
+    // try {
+    //   const response = await generativeModel.generateContent({
+    //     contents: [{ role: 'user', parts: [{ text: 'Just say hello.' }] }],
+    //   });
+    //   const geminiResponseText = response.response.candidates[0].content.parts[0].text;
+    //   console.log('✅ Gemini API Response (in route):', geminiResponseText);
+    //   res.json({
+    //     imageUrl: uploadedImage.secure_url,
+    //     text: extractedText,
+    //     geminiResponse: geminiResponseText // Include Gemini response
+    //   });
+    // } catch (geminiError) {
+    //   console.error('❌ Gemini API Error (in route):', geminiError);
+    //   return res.status(500).json({ message: 'Failed to call Gemini API', error: geminiError.message });
+    // }
+    // --- END: Simplified Gemini API Call ---
+
+    // Delete temporary uploaded file from server
+    fs.unlinkSync(imagePath);
+
+  } catch (error) {
+    console.error('❌ Error extracting text:', error);
+    res.status(500).json({ message: 'Failed to extract text from the image.' });
+  }
+});
+
+
+
 
 async function listAllMediaFiles() {
   try {
@@ -110,8 +1145,64 @@ app.get('/media-library-json', async (req, res) => {
   res.json(mediaJson);
 });
 
-// Route to set JWT cookie for a new user or returning user without a token
+
+app.get('/testing', async (req, res) => {
+  const mediaJson = "this is testinggggggggggggg"
+  console.log('🟢 Media Library endpoint hit');
+  res.json(mediaJson);
+});
+
 app.get('/initialize', (req, res) => {
+  console.log('🟢 Initialize endpoint hit');
+
+  let token = req.cookies.jwt;
+
+  if (!token) {
+      console.log('⚠️ No JWT found in cookies. Generating a new token.');
+
+      const userId = Math.random().toString(36).substring(2); // Generate userId
+
+      // ✅ Fix: Use TOKEN_SECRET for signing
+      token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '7d' });
+
+      console.log('Generated JWT:', token);
+
+      // ✅ Store JWT in the database
+      const query = `INSERT INTO users (userToken, jwt) VALUES (?, ?)`;
+      db.query(query, [userId, token], (err) => {
+          if (err) {
+              console.error('❌ Error inserting new JWT into database:', err);
+              return res.status(500).json({ message: 'Failed to initialize user.' });
+          }
+
+          // ✅ Set JWT cookie
+          res.cookie('jwt', token, {
+              httpOnly: true,
+              secure: process.env.NODE_ENV === 'production',
+              maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+          });
+
+          return res.json({ message: 'JWT set for new user', userId });
+      });
+  } else {
+      console.log('✅ JWT found in cookies. Verifying...');
+
+      try {
+          const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
+          console.log('✅ Token is valid:', decoded);
+          return res.json({ message: 'User identified', userId: decoded.userId });
+      } catch (err) {
+          console.error('❌ Invalid JWT:', err.message);
+          res.clearCookie('jwt'); // Remove invalid JWT
+          return res.status(401).json({ error: "Invalid token, please reinitialize." });
+      }
+  }
+});
+
+
+
+// Route to set JWT cookie for a new user or returning user without a token
+app.get('/initialize2', (req, res) => {
 
   console.log('Initialize endpoint hit');
 
@@ -125,7 +1216,12 @@ app.get('/initialize', (req, res) => {
     const userId = Math.random().toString(36).substring(2);
 
     // Create a new JWT
-    token = generateJwtToken({ userId });
+    //token = generateJwtToken({ userId });
+
+            // ✅ Fix: Use TOKEN_SECRET for signing
+            token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '7d' });
+
+            console.log('Generated JWT:', token);
 
 
     // Insert the new JWT into the database
@@ -299,6 +1395,9 @@ app.post('/insertProducts', (req, res) => {
 
 
 app.post('/insertProducts1', async (req, res) => {
+
+  console.log('Insert products endpoint hit');
+
   const products = req.body;
   let responseSent = false;  // Track if the response has been sent
 
@@ -382,19 +1481,7 @@ app.post('/insertProducts1', async (req, res) => {
 
 // create a get endpoint that will extarct text from image using tesseract.js and return the extracted text as response GIVE THE IMAGE URL AS QUERY PARAMETER
 
-app.get('/extractText', async (req, res) => {
-  const  imageUrl  = "./sample1.jpg";
 
-  try {
-    const { data: { text } } = await Tesseract.recognize(imageUrl, 'eng', { logger: m => console.log(m) });
-
-    console.log('Extracted Text:', text); // Output the extracted text
-
-    res.json({ text });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 
 // create a api endpoint to rename the image file in cloudinary with the public_id and new name as query parameters
@@ -457,6 +1544,7 @@ app.get("/getStores", (req, res) => {
 
 
 // write api to add a product to favorites for a user
+
 
 app.post("/addFavorite", (req, res) => {
 
@@ -681,9 +1769,162 @@ app.put("/editProductDescription", (req, res) => {
 }
 );
 
+
+app.put("/editStore", (req, res) => {
+  
+  const { productId, storeId } = req.body;
+
+  const q = `UPDATE products SET storeId = ? WHERE productId = ?`;
+
+  db.query(q, [storeId, productId], (err, result) => {
+    if (err) {
+      console.error('Error updating store :', err);
+      return res.status(500).json({ error: 'Failed to update store' });
+    }
+    res.status(200).json({ message: 'Store updated successfully' });
+  }
+  );
+}
+);
 //update getProducts endpoint to order the results by keyword count matches between the keywords of the favorite products and the keywords of the products in the database descending
 
 app.get("/getProducts", async (req, res) => {
+
+
+console.log('getProducts endpoint hit');
+
+  const userId = parseInt(req.query.userId, 10) || null;
+  let storeId = parseInt(req.query.storeId, 10);
+  const isFavorite = req.query.isFavorite || null;
+  const onSale = req.query.onSale || null;
+
+  const keyword = req.query.keyword || null;  // Add the keyword parameter
+
+  const page = parseInt(req.query.page, 10) || 1;
+  const limit = parseInt(req.query.limit, 20) || 20;
+  const offset = (page - 1) * limit;
+
+  const today = new Date().toISOString().split('T')[0];
+
+  // Handle invalid storeId case
+  if (isNaN(storeId) || storeId <= 0) {
+    storeId = null;
+  }
+
+  let q = `
+    SELECT 
+      p.productId, 
+      p.product_description, 
+      p.old_price, 
+      p.new_price, 
+      p.discount_percentage, 
+      p.sale_end_date, 
+      p.storeId, 
+      p.image_url,
+      s.storeName,
+      GROUP_CONCAT(k.keyword) AS keywords,
+      CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END AS isFavorite,
+      CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale,
+      (
+        SELECT COUNT(*)
+        FROM productkeywords pkf
+        JOIN keywords kf ON pkf.keywordId = kf.keywordId
+        WHERE pkf.productId = p.productId
+          AND kf.keyword IN (
+            SELECT k.keyword
+            FROM favorites f
+            JOIN productkeywords pk ON f.productId = pk.productId
+            JOIN keywords k ON pk.keywordId = k.keywordId
+            WHERE f.userId = ?
+          )
+      ) AS keywordMatchCount
+    FROM 
+      products p
+    LEFT JOIN 
+      productkeywords pk ON p.productId = pk.productId
+    LEFT JOIN 
+      keywords k ON pk.keywordId = k.keywordId
+    LEFT JOIN
+      favorites f ON p.productId = f.productId AND f.userId = ?
+    LEFT JOIN
+      stores s ON p.storeId = s.storeId
+  `;
+
+  const params = [today, userId, userId];
+
+  // Dynamically build the WHERE clause
+  let conditions = [];
+  if (storeId !== null) {
+    conditions.push(`p.storeId = ?`);
+    params.push(storeId);
+  }
+
+  //console.log('isFavorite::::::::::::', isFavorite);
+  //console.log('isFavorite type:', typeof isFavorite);
+  //console.log('isFavorite value:', isFavorite, 'Length:', isFavorite.length);
+
+
+  if (isFavorite && isFavorite.trim() === 'true') {
+
+    console.log('isFavorite condition hit');  
+
+    conditions.push(`f.userId = ?`);
+    params.push(userId);
+  }
+
+  if (onSale === 'true') {
+    conditions.push(`p.sale_end_date >= ?`);
+    params.push(today);
+  }
+
+  if (keyword) {
+    const keywords = keyword.split(' ').map(kw => kw.trim());
+    const keywordConditions = keywords
+      .filter(kw => kw.length > 1)
+      .map(() => `k.keyword LIKE ?`)
+      .join(' OR ');
+      
+    if (keywordConditions.length > 0) {
+      conditions.push(`(${keywordConditions})`);
+      params.push(...keywords.map(kw => `%${kw}%`));
+    }
+  }
+
+  // If there are conditions, add WHERE and concatenate the conditions
+  if (conditions.length > 0) {
+    q += ' WHERE ' + conditions.join(' AND ');
+  }
+
+  q += `
+    GROUP BY 
+      p.productId
+    ORDER BY 
+      p.productId DESC,
+      productOnSale DESC, 
+      isFavorite DESC,
+      keywordMatchCount DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  // Add limit and offset to the params
+  params.push(limit, offset);
+
+  //console.log("Executing Query:", q);
+  //console.log("With Params:", params);
+
+  db.query(q, params, (err, data) => {
+    if (err) {
+      console.log("getProducts error:", err);
+      return res.json(err);
+    }
+
+    const nextPage = data.length === limit ? page + 1 : null;
+    return res.json({ data, nextPage });
+  });
+});
+
+
+app.get("/getProductsDashboard", async (req, res) => {
   const userId = parseInt(req.query.userId, 10) || null;
   let storeId = parseInt(req.query.storeId, 10);
   const isFavorite = req.query.isFavorite || null;
@@ -820,7 +2061,6 @@ app.get("/getProducts", async (req, res) => {
 
 
 
-
 app.delete('/delete-image', async (req, res) => {
     const { public_id } = req.body;
   
@@ -945,9 +2185,10 @@ console.log(productList);
 
   app.post('/upload-multiple', upload.array('images', 10), async (req, res) => {
 
-    const { folderName } = req.body; // Get folder name from request body
+    const { folderName, storeId } = req.body; // Get folder name from request body
 
     console.log('folderName:', folderName);
+    console.log('storeId:', storeId);
 
     try {
       const uploadPromises = req.files.map(async (file) => {
@@ -980,7 +2221,7 @@ console.log(productList);
                 font_family: 'Arial',
                 font_size: 30,
                 padding: 10,
-                text: '#' + imageName,
+                text: '#' + imageName + ' ' + '@' + storeId,
               },
               gravity: 'north',
               y: -30,
@@ -1087,7 +2328,7 @@ app.post('/upload', upload.single('image'), async (req, res) => {
 
     const options = {
       url: transformationResult.secure_url,
-      dest: '../../downloads/',
+      dest: '../../Downloads/',
     };
 
 
@@ -1098,9 +2339,29 @@ app.post('/upload', upload.single('image'), async (req, res) => {
       .catch((err) => console.error(err));
 
 
+// can you add a way to save images locally using cloudinary
 
-  
 
+// can you add a way to save images locally using cloudinary
+
+const saveLocally = async (url, destination) => {
+  try {
+    const options = {
+      url,
+      dest: destination,
+    };
+
+    const { filename } = await download.image(options);
+    console.log('Saved to locally:', filename);
+  } catch (error) {
+    console.error(error);
+  }
+};
+
+// Usage:
+const transformedImageUrl = transformationResult.secure_url;
+const localDestination = '../../Downloads/';
+await saveLocally(transformedImageUrl, localDestination);
       
     // Clean up the local uploaded file
     fs.unlinkSync(imagePath);
@@ -1111,6 +2372,7 @@ app.post('/upload', upload.single('image'), async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to upload image' });
   }
 });
+
 
 
 const port = process.env.PORT || 3000;
