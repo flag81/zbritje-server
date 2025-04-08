@@ -67,13 +67,13 @@ const vertexAI = new VertexAI({project: 'vision-ai-455010', location: 'us-centra
 
 
 // Load private key for Apple authentication
-const privateKeyPath = path.join(__dirname, "./AuthKey_6YK9NFRYH9.p8"); // Path to your .p8 key file
+const privateKeyPath = path.join(__dirname, "./persistent/keys/AuthKey_6YK9NFRYH9.p8"); // Path to your .p8 key file
 const privateKey = fs.readFileSync(privateKeyPath, "utf8");
 
 //console.log('privateKey:', privateKey);
 
 const client = new vision.ImageAnnotatorClient({
-  keyFilename: path.join(__dirname, './vision-ai-455010-6d2a9944437b.json'), // Replace with your key file path
+  keyFilename: path.join(__dirname, './persistent/keys/vision-ai-455010-6d2a9944437b.json'), // Replace with your key file path
 });
 
 
@@ -129,12 +129,14 @@ app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUniniti
 }));
 
 
+const node_url = process.env.DB_HOST + ':' + process.env.PORT
+
 passport.use(
   new GoogleStrategy(
       {
           clientID: process.env.GOOGLE_CLIENT_ID,
           clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-          callbackURL: "http://localhost:3000/auth/google/callback",
+          callbackURL: `${node_url}/auth/google/callback`,
           passReqToCallback: true,
       },
       (req, accessToken, refreshToken, profile, done) => {
