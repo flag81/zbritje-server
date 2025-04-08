@@ -29,7 +29,7 @@ import vision from '@google-cloud/vision';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const keyFilePath = path.join(__dirname, './vision-ai-455010-6d2a9944437b.json');
+const keyFilePath = path.join(__dirname, './persistent/keys/vision-ai-455010-6d2a9944437b.json');
 
 process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
 
