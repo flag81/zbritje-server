@@ -642,7 +642,6 @@ const corsOptions = {
     'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
     'https://singular-catfish-deciding.ngrok-free.app'] , // Replace with your frontend's origin
   credentials: true, // Allow cookies to be sent with requests
-  origin: true, // Allow all origins (for development purposes)
   methods: ["GET", "POST", "PUT", "DELETE"], // Allow all standard methods
   allowedHeaders: ["Content-Type", "Authorization"], // Allow necessary headers
 };
