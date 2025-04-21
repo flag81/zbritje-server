@@ -24,6 +24,5 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-vision-ai-455010-d952b6232600.json
-AuthKey_6YK9NFRYH9.p8
+*.json
 *.p8
