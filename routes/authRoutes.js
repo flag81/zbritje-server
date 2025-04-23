@@ -83,7 +83,7 @@ router.post("/send-verification-code", async (req, res) => {
 
         transporter.verify((error, success) => {
 
-            console.log("🔍 Verifying SMTP connection...");
+            console.log("🔍 Verifying SMTP connection...++++++++");
 
             if (error) {
               console.error("SMTP connection error:", error);
