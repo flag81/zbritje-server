@@ -130,6 +130,7 @@ app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUniniti
 }));
 
 
+
 passport.use(
   new GoogleStrategy(
       {
@@ -631,6 +632,8 @@ const generativeModel = vertexAI.getGenerativeModel({
 
 
 // Apple Callback Route
+
+
 
 
 const corsOptions = {

@@ -8,57 +8,15 @@ console.log("📧 EMAIL_USER:", process.env.EMAIL_USER ? "Loaded" : "❌ Not Fou
 console.log("🔑 EMAIL_PASS:", process.env.EMAIL_PASS ? "Loaded" : "❌ Not Found");
 
 console.log(process.env.EMAIL_USER, process.env.EMAIL_PASS);
-console.log("🔍 Checking SMTP connection...");
+console.log("🔍 Checking SMTP connection...----.....-----......");
 
 
-let transporter2;
-try {
-    transporter2 = nodemailer.createTransport({
-        service: 'gmail',
-        host: 'smtp.gmail.com',
-        tls: {
-            ciphers: "SSLv3",
-        },
-        port: 587,
-        secure: false,
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS,
-        },
-        debug: true, // Enable debug output
-        logger: true, // Log information
-    });
 
-    // Verify SMTP connection
-    transporter2.verify((error, success) => {
-        if (error) {
-            console.error("❌ SMTP Connection Failed:", error);
-        } else {
-            console.log("✅ SMTP Connection Successful:", success);
-        }
-    });
-} catch (error) {
-    console.error("❌ Error Creating Transporter:", error);
-}
 
 
 
 ;
-const transporter1212 = nodemailer.createTransport({
-    service: 'gmail',
-    host: 'smtp.gmail.com',
-    tls: {
-        ciphers: "SSLv3",
-    },
-    port: 587,
-    secure: false,
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-    debug: true, // Enable debug output
-    logger: true, // Log information
-});
+
 
 const router = express.Router();
 
@@ -114,18 +72,14 @@ router.post("/send-verification-code", async (req, res) => {
         const transporter = nodemailer.createTransport({
             service: 'gmail',
             host: 'smtp.gmail.com',
-            tls: {
-                ciphers: "SSLv3",
-            },
             port: 587,
-            secure: false,
+            secure: false,         // use STARTTLS instead of SSL
+            requireTLS: true,      // upgrade to TLS
             auth: {
                 user: process.env.EMAIL_USER,
                 pass: process.env.EMAIL_PASS,
-            },
-            debug: true, // Enable debug output
-            logger: true, // Log information
-        });
+            }
+        },{ debug: true, logger: true });
 
         transporter.verify((error, success) => {
 
@@ -168,7 +122,7 @@ router.post("/send-verification-code", async (req, res) => {
 
     });
 
-    console.log("✅ Email sent:", info.messageId);
+    console.log("✅ Email sent:");
     return res.json({ success: true, message: "Verification code sent successfully." });
 
 
