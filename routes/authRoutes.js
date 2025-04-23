@@ -7,18 +7,65 @@ console.log("🔍 Checking Email Credentials:");
 console.log("📧 EMAIL_USER:", process.env.EMAIL_USER ? "Loaded" : "❌ Not Found");
 console.log("🔑 EMAIL_PASS:", process.env.EMAIL_PASS ? "Loaded" : "❌ Not Found");
 
-const transporter = nodemailer.createTransport({
-    service: "gmail",
+console.log(process.env.EMAIL_USER, process.env.EMAIL_PASS);
+console.log("🔍 Checking SMTP connection...");
+
+
+let transporter2;
+try {
+    transporter2 = nodemailer.createTransport({
+        service: 'gmail',
+        host: 'smtp.gmail.com',
+        tls: {
+            ciphers: "SSLv3",
+        },
+        port: 587,
+        secure: false,
+        auth: {
+            user: process.env.EMAIL_USER,
+            pass: process.env.EMAIL_PASS,
+        },
+        debug: true, // Enable debug output
+        logger: true, // Log information
+    });
+
+    // Verify SMTP connection
+    transporter2.verify((error, success) => {
+        if (error) {
+            console.error("❌ SMTP Connection Failed:", error);
+        } else {
+            console.log("✅ SMTP Connection Successful:", success);
+        }
+    });
+} catch (error) {
+    console.error("❌ Error Creating Transporter:", error);
+}
+
+
+
+;
+const transporter1212 = nodemailer.createTransport({
+    service: 'gmail',
+    host: 'smtp.gmail.com',
+    tls: {
+        ciphers: "SSLv3",
+    },
+    port: 587,
+    secure: false,
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
     },
+    debug: true, // Enable debug output
+    logger: true, // Log information
 });
 
 const router = express.Router();
 
+//FRONTEND_URL 
+
 router.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "http://localhost:5173");
+    res.header("Access-Control-Allow-Origin", process.env.FRONTEND_URL);
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
     res.header("Access-Control-Allow-Credentials", "true");
@@ -30,43 +77,132 @@ router.use((req, res, next) => {
 const verificationCodes = {}; // Temporary store for verification codes
 
 // ✅ 1. Send Verification Code to Email
-router.post("/send-verification-code", (req, res) => {
-    console.log("📧 Received request body:", req.body);  // ✅ Debugging log
 
-    if (!req.body || !req.body.email) {
-        console.error("❌ ERROR: `email` is missing in request body!");
-        return res.status(400).json({ success: false, message: "Email is required" });
-    }
 
-    const { email } = req.body;
-    const code = Math.floor(100000 + Math.random() * 900000); // Generate 6-digit code
+router.post("/send-verification-code", async (req, res) => {
+    try {
+        console.log("📧 Received request body:", req.body); // Debugging log
 
-    verificationCodes[email] = code;
-    console.log(`✅ Verification code for ${email}: ${code}`);
-
-    const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS,
-        },
-    });
-
-    const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: "Your Verification Code",
-        text: `Your verification code is: ${code}`,
-    };
-
-    transporter.sendMail(mailOptions, (error) => {
-        if (error) {
-            console.error("❌ Email error:", error);
-            return res.status(500).json({ success: false, message: "Failed to send email" });
+        // Validate request body
+        if (!req.body || !req.body.email) {
+            console.error("❌ ERROR: `email` is missing in request body!");
+            return res.status(400).json({ success: false, message: "Email is required" });
         }
-        res.json({ success: true, message: "Verification code sent" });
+
+        const { email } = req.body;
+
+        // Generate a 6-digit verification code
+        const code = Math.floor(100000 + Math.random() * 900000);
+        verificationCodes[email] = code;
+        console.log(`✅ Verification code for ${email}: ${code}`);
+
+        // Check if environment variables are set
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+            console.error("❌ ERROR: Missing email credentials in environment variables!");
+            return res.status(500).json({ success: false, message: "Email service is not configured properly" });
+        }
+        else {
+
+            console.log("✅ Email credentials are set.", {
+                EMAIL_USER: process.env.EMAIL_USER,
+                EMAIL_PASS: process.env.EMAIL_PASS ? "Loaded" : "Not Loaded",
+            });
+        }
+
+
+
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            host: 'smtp.gmail.com',
+            tls: {
+                ciphers: "SSLv3",
+            },
+            port: 587,
+            secure: false,
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS,
+            },
+            debug: true, // Enable debug output
+            logger: true, // Log information
+        });
+
+        transporter.verify((error, success) => {
+
+            console.log("🔍 Verifying SMTP connection...");
+
+            if (error) {
+              console.error("SMTP connection error:", error);
+            } else {
+              console.log("SMTP server is ready to take messages:", success);
+            }
+          });
+
+        // Define email options
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: "Your Verification Code",
+            text: `Your verification code is: ${code}`,
+        };
+
+        console.log("📧 mailOptions:", mailOptions); // Debugging log
+
+        // Send the email
+
+    await new Promise((resolve, reject) => {
+        transporter.sendMail(mailOptions, (error, info) => {
+
+            console.log("📧 Sending email to:", email); // Debugging log
+
+            if (error) {
+                console.error("❌ Email error:", error);
+                //return res.status(500).json({ success: false, message: "Failed to send email" });
+                return reject(err);
+            }
+            console.log("✅ Email sent successfully");
+            //resolve(info);
+            resolve(info);
+            //res.json({ success: true, message: "Verification code sent successfully." });
+        });
+
     });
+
+    console.log("✅ Email sent:", info.messageId);
+    return res.json({ success: true, message: "Verification code sent successfully." });
+
+
+    } catch (err) {
+        // Catch any unexpected errors
+        console.error("❌ ERROR: Unexpected error occurred:", err);
+        res.status(500).json({ success: false, message: "An unexpected error occurred" });
+    }
 });
+
+
+router.post("/send-verification-code222", async (req, res) => {
+    try {
+      // … validate + prepare mailOptions …
+  
+      const info = await new Promise((resolve, reject) => {
+        transporter.sendMail(mailOptions, (err, info) => {
+          if (err) {
+            console.error("❌ sendMail callback error:", err);
+            return reject(err);
+          }
+          resolve(info);
+        });
+      });
+  
+      console.log("✅ Email sent:", info.messageId);
+      return res.json({ success: true, message: "Verification code sent successfully." });
+    }
+    catch (err) {
+      console.error("❌ sendMail promise wrapper error:", err);
+      return res.status(500).json({ success: false, message: "Failed to send email", error: err.message });
+    }
+  });
+
 
 
 router.post("/verify-code", (req, res) => {
@@ -145,11 +281,13 @@ router.post("/verify-code", (req, res) => {
                     maxAge: 7 * 24 * 60 * 60 * 1000,
                 });
 
-                return res.json({ success: true, userId, email: email });
+                return res.json({ success: true, userId });
             });
         }
     });
 });
+
+
 
 
 
