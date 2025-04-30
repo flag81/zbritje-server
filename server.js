@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 
 
 
+
 dotenv.config();
 
 import express from 'express';
@@ -15,6 +16,8 @@ import { fileURLToPath } from "url";
 import path from "path";
 
 import vision from '@google-cloud/vision';
+
+import JSON5 from 'json5';
 
 //const { VertexAI } = require('@google-cloud/vertexai');
 
@@ -130,13 +133,12 @@ app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUniniti
 }));
 
 
-
 passport.use(
   new GoogleStrategy(
       {
           clientID: process.env.GOOGLE_CLIENT_ID,
           clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-          callbackURL: `${process.env.BACKEND_URL}/auth/google/callback`,
+          callbackURL: "http://localhost:3000/auth/google/callback",
           passReqToCallback: true,
       },
       (req, accessToken, refreshToken, profile, done) => {
@@ -498,121 +500,6 @@ app.post("/auth/apple/callback33", async (req, res) => {
 });
 
 
-app.post("/auth/apple/callback222", async (req, res) => {
-    try {
-        console.log("🍏 Apple OAuth Callback Triggered");
-
-        const { id_token } = req.body; // Apple sends `id_token`
-
-        if (!id_token) {
-            console.error("❌ No ID token received from Apple.");
-            return res.status(400).json({ error: "Missing ID token" });
-        }
-
-        // Fetch Apple's public keys
-        const appleKeys = await axios.get("https://appleid.apple.com/auth/keys");
-        const applePublicKeys = appleKeys.data.keys;
-
-        // Decode the JWT header to get the `kid`
-        const decodedHeader = jwt.decode(id_token, { complete: true });
-        if (!decodedHeader) {
-            console.error("❌ Failed to decode Apple ID token.");
-            return res.status(400).json({ error: "Invalid ID token" });
-        }
-
-        // Find the matching key
-        const key = applePublicKeys.find(k => k.kid === decodedHeader.header.kid);
-        if (!key) {
-            console.error("❌ Matching Apple key not found.");
-            return res.status(400).json({ error: "Invalid key" });
-        }
-
-        // Verify the ID token
-        const verifiedPayload = jwt.verify(id_token, jwt.jwkToPem(key), { algorithms: ["RS256"] });
-
-        console.log("✅ Apple ID Token Verified:", verifiedPayload);
-
-        const appleId = verifiedPayload.sub; // Apple's unique user identifier
-        let email = verifiedPayload.email || null; // Email may be missing
-
-        console.log(`🍏 Received AppleID: ${appleId}, Email: ${email || "No email provided"}`);
-
-        // Check if the user already exists
-        const checkQuery = `SELECT userId, email FROM users WHERE userId = ? OR email = ?`;
-        db.query(checkQuery, [appleId, email], (err, results) => {
-            if (err) {
-                console.error("❌ Database error:", err);
-                return res.status(500).json({ error: "Database error" });
-            }
-
-            if (results.length > 0) {
-                // ✅ Existing user found
-                const existingUser = results[0];
-                console.log(`✅ Existing user found: userId=${existingUser.userId}, email=${existingUser.email || "No email"}`);
-
-                // If email is missing, update it
-                if (!existingUser.email && email) {
-                    const updateQuery = `UPDATE users SET email = ? WHERE userId = ?`;
-                    db.query(updateQuery, [email, existingUser.userId], (updateErr) => {
-                        if (updateErr) {
-                            console.error("❌ Error updating email:", updateErr);
-                            return res.status(500).json({ error: "Failed to update email" });
-                        }
-                        console.log(`✅ Email updated for userId=${existingUser.userId}`);
-                    });
-                }
-
-                // Generate JWT for existing user
-                const token = jwt.sign(
-                    { userId: existingUser.userId, email: existingUser.email || email },
-                    process.env.TOKEN_SECRET,
-                    { expiresIn: "7d" }
-                );
-
-                res.cookie("jwt", token, {
-                    httpOnly: true,
-                    secure: true,
-                    sameSite: "None",
-                    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                });
-
-                return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
-            } else {
-                // 🆕 New user - Insert into database
-                console.log(`🆕 New user detected, inserting: ${email || "No email provided"}`);
-
-                const insertQuery = `INSERT INTO users (userId, email) VALUES (?, ?)`;
-                db.query(insertQuery, [appleId, email], (insertErr) => {
-                    if (insertErr) {
-                        console.error("❌ Error inserting new user:", insertErr);
-                        return res.status(500).json({ error: "Failed to insert new user" });
-                    }
-
-                    console.log(`✅ New user inserted: AppleID=${appleId}, Email=${email || "No email"}`);
-
-                    // Generate JWT for new user
-                    const token = jwt.sign({ userId: appleId, email }, process.env.TOKEN_SECRET, { expiresIn: "7d" });
-
-                    res.cookie("jwt", token, {
-                        httpOnly: true,
-                        secure: true,
-                        sameSite: "None",
-                        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                    });
-
-                    return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
-                });
-            }
-        });
-
-    } catch (error) {
-        console.error("❌ Apple OAuth Error:", error);
-        return res.status(500).json({ error: "Apple authentication failed" });
-    }
-});
-
-
-
 
 
 // Specify the model you want to use (e.g., Gemini 1.5 Pro)
@@ -632,8 +519,6 @@ const generativeModel = vertexAI.getGenerativeModel({
 
 
 // Apple Callback Route
-
-
 
 
 const corsOptions = {
@@ -667,25 +552,19 @@ async function  insertProducts1(jsonData) {
 
 // resove this error with jsonData : SyntaxError: Unexpected token '`', "```json
 
-jsonData = jsonData.replace(/`/g, ''); // Remove backticks
-
-  jsonData = jsonData.replace(/```json/g, ''); // Remove code block markers
-
-  jsonData = jsonData.replace(/```/g, ''); // Remove code block markers
-
-  jsonData = jsonData.replace(/\\n/g, ''); // Remove new line characters
-
-  // how to remove parts like - ```json  ```
-  
-  jsonData = jsonData.replace(/```/g, ''); // Remove code block markers
-
-  jsonData = jsonData.replace(/json/g, ''); // Remove code block markers
+ 
+jsonData = jsonData
+  // strip ```json at the very start
+  .replace(/^```json\s*/, '')
+  // strip any trailing ```
+  .replace(/\s*```$/, '')
+  // now remove any remaining single backticks in the body
+  .replace(/`/g, '');
 
 
 
 
-
-  const products = JSON.parse(jsonData); // Parse the JSON data
+  const products = JSON5.parse(jsonData); // Parse the JSON data
 
   console.log('Products received:', products);
 
@@ -827,6 +706,7 @@ async function formatDataToJson(textData, image_url) {
 
       await insertProducts1(text); // Call the insert function with the text data
 
+
       // try {
       //     const jsonObject = JSON.parse(text);
       //     return jsonObject;
@@ -835,6 +715,13 @@ async function formatDataToJson(textData, image_url) {
       //     console.error('Failed JSON Text:', text); // Log the failed JSON string
       //     return null; // Or throw an error if you prefer
       // }
+
+      // respond with the text data to the client with res.json
+
+      return text; // Return the formatted JSON data
+
+
+
 
   } catch (error) {
       console.error('Gemini API Error:', error);
@@ -984,6 +871,7 @@ app.get('/auth/google',
 
 
 
+
   app.get("/auth/google/callback3", passport.authenticate("google", { failureRedirect: "/" }), (req, res) => {
 
 
@@ -1048,7 +936,61 @@ const SECRET_KEY = 'AAAA-BBBB-CCCC-DDDD-EEEE';
 const upload = multer({ dest: 'uploads/' }); // Define upload middleware
 
 
+// Single‐file extract‐text route
 app.post('/extract-text', upload.single('image'), async (req, res) => {
+  console.log('🔍 Extracting text from image…');
+
+  try {
+    // 1️⃣ Validate
+    if (!req.file) {
+      console.error('❌ No image file provided.');
+      return res.status(400).json({ message: 'No image file provided.' });
+    }
+
+    const imagePath = req.file.path;
+    console.log(`🛣️  Local path: ${imagePath}`);
+
+    // 2️⃣ Upload to Cloudinary
+    console.log('▶️  Uploading to Cloudinary…');
+    const uploadedImage = await cloudinary.uploader.upload(imagePath, {
+      folder: 'uploads',
+      public_id: req.file.originalname.split('.')[0],
+      resource_type: 'image',
+      overwrite: true,
+    });
+    const imageUrl = uploadedImage.secure_url;
+    console.log('✅ Uploaded URL:', imageUrl);
+
+    // 3️⃣ OCR with Google Vision
+    console.log('▶️  Running textDetection on Google Vision…');
+    const [visionResult] = await client.textDetection(imageUrl);
+    const detections = visionResult.textAnnotations;
+    const extractedText = detections?.[0]?.description || '';
+    console.log('✅ Extracted text:', extractedText);
+
+    // 4️⃣ Format to JSON
+    console.log('▶️  Formatting text to JSON…');
+    const jsonText = await formatDataToJson(extractedText, imageUrl);
+    console.log('✅ Formatted JSON:', jsonText);
+
+    // 5️⃣ Cleanup
+    fs.unlinkSync(imagePath);
+    console.log('✅ Deleted temp file');
+
+    // 6️⃣ Respond
+    return res.json({ extractedText, jsonText, imageUrl });
+
+  } catch (err) {
+    console.error('❌ Error in /extract-text route:', err);
+    return res.status(500).json({
+      message: 'Failed to extract text from image.',
+      error: err.message
+    });
+  }
+});
+
+
+app.post('/extract-text2', upload.single('image'), async (req, res) => {
   console.log('🔍 Extracting text from image...');
 
   try {
@@ -1069,6 +1011,9 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
 
 
     });
+
+    // return repose with the uploaded image url and the original file name is successfully uploaded
+
 
     console.log('✅ Image uploaded to Cloudinary:', uploadedImage.secure_url);
 
@@ -1110,6 +1055,13 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
 
     // Delete temporary uploaded file from server
     fs.unlinkSync(imagePath);
+
+        // send one response with all three pieces
+        res.json({
+          extractedText: extractedText,
+          jsonText: jsonText,
+          imageUrl: uploadedImage.secure_url
+        });
 
   } catch (error) {
     console.error('❌ Error extracting text:', error);
@@ -1883,6 +1835,7 @@ app.put("/editStore", (req, res) => {
 app.get("/getProducts", async (req, res) => {
 
 
+
 console.log('getProducts endpoint hit');
 
   const userId = parseInt(req.query.userId, 10) || null;
@@ -2358,112 +2311,111 @@ console.log(productList);
   
 
 
-
+//upload.array('images', 10)
 
 
 
 
 // Function to upload an image to a specific folder in Cloudinary
-app.post('/upload', upload.single('image'), async (req, res) => {
-  const imagePath = req.file.path;
-  const { folderName } = req.body; // Get folder name from request body
-
-
-  console.log('folderName:', folderName);
-
+app.post('/upload', upload.array('images', 10), async (req, res) => {
   try {
-    const result = await cloudinary.uploader.upload(imagePath, {
-      folder: folderName || 'default-folder', // If no folder is specified, use 'default-folder'
-      use_filename: true,                       // Keep the original filename
-      unique_filename: false,    
-      
-    });
+    const uploadPromises = req.files.map(async (file) => {
+      const imagePath = file.path;
+      //const imagePath = req.file.path;
+      const { folderName } = req.body; // Get folder name from request body
 
-    console.log('result from upload:', result.public_id);
+      console.log('folderName:', folderName);
 
-    const publicId = result.public_id;
+      const result = await cloudinary.uploader.upload(imagePath, {
+        folder: folderName || 'default-folder', // If no folder is specified, use 'default-folder'
+        use_filename: true,                       // Keep the original filename
+        unique_filename: false,
+      });
 
-    // split the public_id with forward slash / and get the last part of the string
+      console.log('result from upload:', result.public_id);
 
-    const imageName = publicId.split('/').pop();
-      
-    // can you add option to add text overlay at the bottom also
+      const publicId = result.public_id;
+      // split the public_id with forward slash / and get the last part of the string
+      const imageName = publicId.split('/').pop();
 
+      // can you add option to add text overlay at the bottom also
 
+      const transformationResult = await cloudinary.uploader.upload(result.secure_url, {
+        type: 'upload',
+        overwrite: true, // Ensure the image is replaced
+        transformation: [
+          {
+            overlay: {
+              font_family: 'Arial',
+              font_size: 30,
+              padding: 10,
+              text: '#' + imageName,
+            },
+            gravity: 'north',
+            y: -30,
+            x: 10
+          }
+        ],
+      });
 
-    const transformationResult = await cloudinary.uploader.upload(publicId, {
-      type: 'upload',
-      overwrite: true, // Ensure the image is replaced
-      transformation: [
-        {
-          overlay: {
-            font_family: 'Arial',
-            font_size: 30,
-            padding: 10,
-            text: '#'+ imageName,
-          },
-          gravity: 'north',
-          y: -30,
-          x: 10
+      console.log('Transformed image URL:', transformationResult.secure_url);
+
+      // add code to download the image from the transformed image url and save it to the local folder using cloudinary
+
+      const options = {
+        url: transformationResult.secure_url,
+        dest: '../../Downloads/',
+      };
+
+      download.image(options)
+        .then(({ filename }) => {
+          console.log('Saved to', filename);  // saved to /path/to/dest/image.jpg
+        })
+        .catch((err) => console.error(err));
+
+      // can you add a way to save images locally using cloudinary
+
+      // can you add a way to save images locally using cloudinary
+
+      const saveLocally = async (url, destination) => {
+        try {
+          const opts = { url, dest: destination };
+          const { filename } = await download.image(opts);
+          console.log('Saved to locally:', filename);
+        } catch (error) {
+          console.error(error);
         }
+      };
 
-        
-      ],
+      // Usage:
+      const transformedImageUrl = transformationResult.secure_url;
+      const localDestination = '../../Downloads/';
+      await saveLocally(transformedImageUrl, localDestination);
+
+      // Clean up the local uploaded file
+      fs.unlinkSync(imagePath);
+
+      // Return the Cloudinary URL and public ID of the uploaded image
+      return {
+        success: true,
+        url: result.secure_url,
+        public_id: result.public_id,
+        format: result.format
+      };
     });
 
-    console.log('Transformed image URL:', transformationResult.secure_url);
-  
-    // add code to download the image from the transformed image url and save it to the local folder using cloudinary
+    // Wait for all uploads/transforms/downloads to finish
+    const images = await Promise.all(uploadPromises);
 
+    // Send a single response with all results
+    res.json({ success: true, images });
 
-
-
-    const options = {
-      url: transformationResult.secure_url,
-      dest: '../../Downloads/',
-    };
-
-
-    download.image(options)
-      .then(({ filename }) => {
-        console.log('Saved to', filename);  // saved to /path/to/dest/image.jpg
-      })
-      .catch((err) => console.error(err));
-
-
-// can you add a way to save images locally using cloudinary
-
-
-// can you add a way to save images locally using cloudinary
-
-const saveLocally = async (url, destination) => {
-  try {
-    const options = {
-      url,
-      dest: destination,
-    };
-
-    const { filename } = await download.image(options);
-    console.log('Saved to locally:', filename);
   } catch (error) {
     console.error(error);
-  }
-};
-
-// Usage:
-const transformedImageUrl = transformationResult.secure_url;
-const localDestination = '../../Downloads/';
-await saveLocally(transformedImageUrl, localDestination);
-      
-    // Clean up the local uploaded file
-    fs.unlinkSync(imagePath);
-
-    // Return the Cloudinary URL and public ID of the uploaded image
-    res.json({ success: true, url: result.secure_url, public_id: result.public_id , format: result.format});
-  } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to upload image' });
   }
 });
+
 
 
 

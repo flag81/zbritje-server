@@ -100,8 +100,8 @@ router.post("/send-verification-code", async (req, res) => {
         const mailOptions = {
             from: process.env.EMAIL_USER,
             to: email,
-            subject: "Your Verification Code",
-            text: `Your verification code is: ${code}`,
+            subject: "Kodi i Verifikimit nga Meniven.com",
+            text: `Kodi i Verifikimit eshte: ${code}`,
         };
 
         console.log("📧 mailOptions:", mailOptions); // Debugging log
