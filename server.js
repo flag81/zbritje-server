@@ -7,7 +7,6 @@ import dotenv from 'dotenv';
 
 
 
-
 dotenv.config();
 
 import express from 'express';
@@ -664,10 +663,13 @@ jsonData = jsonData
 
 
 
-async function formatDataToJson(textData, image_url) {
+async function formatDataToJson(textData, image_url, saleEndDate, storeId) {
 
 
   console.log('🔍 Formatting text data into JSON...');
+
+  console.log('Text sale end date and store Id:', saleEndDate, storeId); // Log the text data for debugging
+
 
   const geminiPrompt = 'Can you format the text data given, about product sale information in albanian language from this sales flyer data for each product' +
   ' Convert ë letter to e for all the keywords. Do not include conjunctions, articles words in Albanian language, in keywords.\n' +
@@ -678,6 +680,10 @@ async function formatDataToJson(textData, image_url) {
     `Text Data: ${textData}` +
 
     `The image url is: ${image_url}` +
+
+    `The sale_end_date is: ${saleEndDate}` +
+
+    `The storeId is: ${storeId}` +
   
    
     'The response should be in the JSON format for each product as object in an array of objects: \n' +
@@ -940,6 +946,14 @@ const upload = multer({ dest: 'uploads/' }); // Define upload middleware
 app.post('/extract-text', upload.single('image'), async (req, res) => {
   console.log('🔍 Extracting text from image…');
 
+  // extract the saleEndDate from body of api call
+
+  const { saleEndDate, storeId } = req.body;
+  console.log('Sale End Date:', saleEndDate); // Log the saleEndDate for debugging
+  console.log('Store ID:', storeId); // Log the storeId for debugging
+  console.log('Image file:', req.file); // Log the uploaded file for debugging
+
+
   try {
     // 1️⃣ Validate
     if (!req.file) {
@@ -968,9 +982,15 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
     const extractedText = detections?.[0]?.description || '';
     console.log('✅ Extracted text:', extractedText);
 
+   
+
+
+
+
+
     // 4️⃣ Format to JSON
     console.log('▶️  Formatting text to JSON…');
-    const jsonText = await formatDataToJson(extractedText, imageUrl);
+    const jsonText = await formatDataToJson(extractedText, imageUrl, saleEndDate, storeId);
     console.log('✅ Formatted JSON:', jsonText);
 
     // 5️⃣ Cleanup
