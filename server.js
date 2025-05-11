@@ -7,6 +7,8 @@ import dotenv from 'dotenv';
 // We no longer need groupTextElementsSpatially if extracting directly from image
 // import { groupTextElementsSpatially } from './utils.js';
 
+
+
 dotenv.config();
 
 import express from 'express';
@@ -433,11 +435,13 @@ const generativeModel = vertexAI.getGenerativeModel({
 });
 
 
+
 // Apple Callback Route (keeping this)
 const corsOptions = {
   origin: [process.env.FRONTEND_URL, process.env.FRONTEND_URL2,
     'http://localhost:5173',
-    'http://192.168.1.*', // Allow local network IPs
+    'http://192.168.1.2:5173', // Allow local network IPs
+    'http://192.168.1.2:3000', // Add your server's local IP
     'http://localhost:5173/dashboard',
     'https://www.meniven.com',
     'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
@@ -621,15 +625,48 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
     console.log(`🛣️  Local path: ${imagePath}`);
 
     // 1️⃣ Upload to Cloudinary to get a public URL
-    console.log('▶️  Uploading to Cloudinary…');
+    // console.log('▶️  Uploading to Cloudinary…');
+    // const uploadedImage = await cloudinary.uploader.upload(imagePath, {
+    //   folder: 'uploads',
+    //   public_id: req.file.originalname.split('.')[0],
+    //   resource_type: 'image',
+    //   overwrite: true,
+    //   unique_filename: false,
+    //   format: 'webp',           // ← converts to WebP
+    //   dpr: 'auto',            // ← sets device pixel ratio
+    //   // how to highest quality
+
+
+    //   quality: 'auto:best',     // ← sets quality
+
+
+
+    // });
+
+        const autoTransformation = 'f_auto,q_auto,dpr_auto';
+
     const uploadedImage = await cloudinary.uploader.upload(imagePath, {
       folder: 'uploads',
       public_id: req.file.originalname.split('.')[0],
       resource_type: 'image',
       overwrite: true,
+      unique_filename: false,
+            transformation: [
+                {
+                  fetch_format: 'auto',  // f_auto
+                  quality:      'auto',  // q_auto
+                  dpr:          'auto'   // dpr_auto
+                }
+              ]
     });
+    
+
+
     const imageUrl = uploadedImage.secure_url;
     console.log('✅ Uploaded URL:', imageUrl);
+
+
+
 
     // 2️⃣ Format and Extract data using Gemini 1.5 Pro directly from the image URL
     console.log('▶️  Formatting and extracting data from image using Gemini 1.5 Pro…');
@@ -1816,8 +1853,43 @@ app.post('/upload-multiple', upload.array('images', 10), async (req, res) => {
   }
 });
 
-
 app.post('/upload', upload.array('images', 10), async (req, res) => {
+  try {
+    const uploadPromises = req.files.map(async file => {
+      const imagePath = file.path;
+      // convert to WebP on upload:
+      const result = await cloudinary.uploader.upload(imagePath, {
+        folder: req.body.folderName || 'default-folder',
+        use_filename: true,
+        unique_filename: false,
+        overwrite: true,
+        transformation: [
+          // first you can cap size if you like:
+          // { width: 2000, crop: 'limit' },
+          // then *actually* convert:
+          { fetch_format: 'webp', quality: 'auto' }
+        ]
+      });
+      fs.unlinkSync(imagePath);
+      return {
+        success: true,
+        url: result.secure_url,  // this is .webp
+        public_id: result.public_id,
+        format: result.format    // should be 'webp'
+      };
+    });
+
+    const images = await Promise.all(uploadPromises);
+    res.json({ success: true, images });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: 'Failed to upload image' });
+  }
+});
+
+
+
+app.post('/upload0', upload.array('images', 10), async (req, res) => {
   try {
     const uploadPromises = req.files.map(async (file) => {
       const imagePath = file.path;
@@ -1827,6 +1899,9 @@ app.post('/upload', upload.array('images', 10), async (req, res) => {
         folder: folderName || 'default-folder',
         use_filename: true,
         unique_filename: false,
+        overwrite: true,
+        format: 'webp',       // ← here
+        resource_type: 'image'
       });
       console.log('result from upload:', result.public_id);
       const publicId = result.public_id;
