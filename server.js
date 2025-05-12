@@ -1120,10 +1120,18 @@ async function insertProducts1(jsonData) {
       const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url } = product;
       console.log('Processing product:', product_description);
 
+      // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
+// if the price is missing or null set it to 0
+
+      const oldPriceNumber = old_price ? parseFloat(old_price.replace(',', '.').replace('€', '').trim()) : 0;
+      const newPriceNumber = new_price ? parseFloat(new_price.replace(',', '.').replace('€', '').trim()) : 0;
+
+      
+
       const productResult = await dbQuery(
         `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url)
         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url]
+        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url]
       );
 
       const productId = productResult.insertId;
