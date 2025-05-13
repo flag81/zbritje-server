@@ -1666,8 +1666,131 @@ app.put("/editStore", (req, res) => {
 });
 
 
+app.get("/getProducts", async (req, res) => {
+  console.log('getProducts endpoint hit');
+  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
+  let storeId = parseInt(req.query.storeId, 10);
+  const isFavoriteQueryParam = req.query.isFavorite === 'true';
+  const onSale = req.query.onSale === 'true';
+  const keywordQuery = req.query.keyword || null; // Renamed to avoid conflict with table alias 'k'
+  const page = parseInt(req.query.page, 10) || 1;
+  const limit = parseInt(req.query.limit, 10) || 20;
+  const offset = (page - 1) * limit;
+  const today = new Date().toISOString().split('T')[0];
+
+  if (isNaN(storeId) || storeId <= 0) {
+    storeId = null;
+  }
+
+  // --- MODIFICATION START: Prepare for matched_keyword_count ---
+  const searchKeywordsArray = keywordQuery ? keywordQuery.split(' ').map(kw => kw.trim()).filter(kw => kw.length > 1) : [];
+  let matchedKeywordCountSelectSQL = '0 AS matched_keyword_count'; // Default value
+  const paramsForMatchedKeywordCountSubquery = []; // Parameters for the subquery in SELECT
+
+  if (searchKeywordsArray.length > 0) {
+    const matchConditionsForSubquery = searchKeywordsArray.map(() => `sk_match.keyword LIKE ?`).join(' OR ');
+    matchedKeywordCountSelectSQL = `
+      (
+        SELECT COUNT(DISTINCT sk_match.keywordId)
+        FROM productkeywords pk_match
+        JOIN keywords sk_match ON pk_match.keywordId = sk_match.keywordId
+        WHERE pk_match.productId = p.productId AND (${matchConditionsForSubquery})
+      ) AS matched_keyword_count
+    `;
+    searchKeywordsArray.forEach(kw => paramsForMatchedKeywordCountSubquery.push(`${kw}%`));
+  }
+  // --- MODIFICATION END ---
+
+  let fromAndJoins = `
+    FROM
+      products p
+    LEFT JOIN stores s ON p.storeId = s.storeId
+    LEFT JOIN productkeywords pk ON p.productId = pk.productId
+    LEFT JOIN keywords k ON pk.keywordId = k.keywordId
+    ${userId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}
+  `;
+
+  // Main SELECT statement including the dynamic matched_keyword_count
+  let q = `
+    SELECT
+      p.productId, p.product_description, p.old_price, p.new_price,
+      p.discount_percentage, p.sale_end_date, p.storeId, p.image_url,
+      s.storeName,
+      GROUP_CONCAT(DISTINCT k.keyword SEPARATOR ',') AS keywords,
+      ${matchedKeywordCountSelectSQL},
+      ${userId ? 'CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END' : 'FALSE'} AS isFavorite,
+      CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale
+    ${fromAndJoins}
+  `;
+
+  // Build parameters for the SELECT part first
+  const selectParams = [];
+  selectParams.push(...paramsForMatchedKeywordCountSubquery); // Params for the subquery
+  selectParams.push(today); // For productOnSale CASE WHEN
+  if (userId) {
+    selectParams.push(userId); // For isFavorite CASE WHEN (and the JOIN if userId is present)
+  }
+
+
+  // Build WHERE clause conditions and parameters
+  let conditions = [];
+  const whereParams = [];
+
+  if (storeId !== null) {
+    conditions.push(`p.storeId = ?`);
+    whereParams.push(storeId);
+  }
+
+  if (isFavoriteQueryParam && userId) {
+    conditions.push(`EXISTS (SELECT 1 FROM favorites fav_sub WHERE fav_sub.productId = p.productId AND fav_sub.userId = ?)`);
+    whereParams.push(userId); // This userId is for the EXISTS subquery condition
+  }
+
+  if (onSale) {
+    conditions.push(`p.sale_end_date >= ?`);
+    whereParams.push(today);
+  }
+
+  if (searchKeywordsArray.length > 0) {
+    // These conditions are for filtering rows (WHERE clause)
+    const keywordTableConditions = searchKeywordsArray.map(() => `k.keyword LIKE ?`).join(' OR ');
+    const descriptionConditions = searchKeywordsArray.map(() => `p.product_description LIKE ?`).join(' OR ');
+    conditions.push(`((${keywordTableConditions}) OR (${descriptionConditions}))`);
+    searchKeywordsArray.forEach(kw => whereParams.push(`${kw}%`)); // Params for k.keyword in WHERE
+    searchKeywordsArray.forEach(kw => whereParams.push(`${kw}%`)); // Params for p.product_description in WHERE
+  }
+
+  if (conditions.length > 0) {
+    q += ' WHERE ' + conditions.join(' AND ');
+  }
+
+  // Add GROUP BY, ORDER BY, and LIMIT/OFFSET
+  q += `
+    GROUP BY p.productId ${matchedKeywordCountSelectSQL !== '0 AS matched_keyword_count' ? '' : ''} 
+    /* If matched_keyword_count is a subquery on p.productId, explicit grouping by it might not be needed, 
+       but p.productId needs to be the primary grouping key. The DB might optimize.
+       For safety, ensure all non-aggregated SELECT columns (that aren't functionally dependent on p.productId)
+       would be included if not for the subquery. Here, the subquery IS dependent on p.productId.
+    */
+    ORDER BY matched_keyword_count DESC, p.productId DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  // Combine all parameters in the correct order
+  const finalParams = [...selectParams, ...whereParams, limit, offset];
+
+  try {
+    const data = await queryPromise(q, finalParams);
+    const nextPage = data.length === limit ? page + 1 : null;
+    return res.json({ data, nextPage });
+  } catch(err) {
+    console.log("getProducts error:", err);
+    return res.status(500).json({ error: "Failed to retrieve products" });
+  }
+});
+
 // --- MODIFIED: /getProducts endpoint ---
-app.get("/getProducts", async (req, res) => { // Added async
+app.get("/getProducts111", async (req, res) => { // Added async
   console.log('getProducts endpoint hit');
   // Get userId from middleware if available
   const userId = req.identifiedUser ? req.identifiedUser.userId : null;
@@ -1748,9 +1871,9 @@ app.get("/getProducts", async (req, res) => { // Added async
            const descriptionConditions = keywords.map(() => `p.product_description LIKE ?`).join(' OR ');
            conditions.push(`((${keywordConditions}) OR (${descriptionConditions}))`);
            // Add params for keywords table search
-           params.push(...keywords.map(kw => `%${kw}%`));
+           params.push(...keywords.map(kw => `${kw}%`));
            // Add params for description search
-           params.push(...keywords.map(kw => `%${kw}%`));
+           params.push(...keywords.map(kw => `${kw}%`));
        }
   }
 
@@ -1765,8 +1888,16 @@ app.get("/getProducts", async (req, res) => { // Added async
   `;
   params.push(limit, offset);
 
+  // how return the total number of products without pagination
+
+
+
+
+
   try {
     const data = await queryPromise(q, params);
+
+
     const nextPage = data.length === limit ? page + 1 : null;
     return res.json({ data, nextPage });
   } catch(err) {
