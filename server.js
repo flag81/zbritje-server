@@ -7,6 +7,9 @@ import dotenv from 'dotenv';
 // We no longer need groupTextElementsSpatially if extracting directly from image
 // import { groupTextElementsSpatially } from './utils.js';
 
+import identifyUserMiddleware from './identifyUserMiddleware.js'
+import  {queryPromise}  from './dbUtils.js';
+
 
 
 dotenv.config();
@@ -448,6 +451,7 @@ const corsOptions = {
     'https://singular-catfish-deciding.ngrok-free.app'] , // Replace with your frontend's origin
   credentials: true,
   origin: true,
+  sameSite: 'none', 
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
@@ -458,25 +462,15 @@ app.use(cors(corsOptions));
 app.use(cookieParser());
 app.use(bodyParser.json());
 
+app.use(identifyUserMiddleware);
+
+
+
 
 import authRoutes from "./routes/authRoutes.js";
 app.use("/auth", authRoutes);
 
 
-const verifyToken = (req, res, next) => {
-  const token = req.cookies.jwt;
-  if (!token) {
-    return res.status(403).send('A token is required for authentication');
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-  } catch (err) {
-    return res.status(401).send('Invalid token');
-  }
-  return next();
-};
 
 
 app.post('/dashboardLogin', (req, res) => {
@@ -496,7 +490,7 @@ app.post('/dashboardLogin', (req, res) => {
   });
 });
 
-app.get("/check-session",  (req, res) => {
+app.get("/check-session0",  (req, res) => {
   const token = req.cookies.jwt;
   if (!token) {
       return res.json({ isLoggedIn: false, userId: null });
@@ -523,6 +517,49 @@ app.get("/check-session",  (req, res) => {
   }
 });
 
+
+
+// Consider removing this if /auth/check-session is sufficient and used by frontend
+app.get("/check-session", async (req, res) => { // Added async
+
+  console.log("🔍 Checking session...");
+  
+  if (req.identifiedUser && req.identifiedUser.userId) {
+      // User identified by middleware, verify against DB
+      try {
+          // Fetch necessary details, including registration status/email
+          const query = `SELECT userId, email, userName, is_registered FROM users WHERE userId = ?`;
+          const results = await queryPromise(query, [req.identifiedUser.userId]);
+
+          if (results.length === 0) {
+            console.log(`⚠️ User ${req.identifiedUser.userId} not found in DB during check-session.`);
+              console.warn(`⚠️ User ${req.identifiedUser.userId} from token not found in DB during check-session. Clearing cookie.`);
+              res.clearCookie("jwt");
+              return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+          }
+
+          const user = results[0];
+
+          console.log(`🔍 User found in DB: ${user.userId}, Email: ${user.email || "No email"}`)  ;
+
+          console.log(`✅ Session check successful for userId: ${user.userId}, Registered: ${user.is_registered}`);
+          return res.json({
+              isLoggedIn: true, // Means a valid ID exists
+              isRegistered: !!user.is_registered, // Check registration status
+              userId: user.userId,
+              email: user.email // Will be null for anonymous users
+          });
+
+      } catch (err) {
+          console.error("❌ DB error during /check-session:", err);
+          return res.status(500).json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+      }
+  } else {
+      // No valid token identified by middleware
+      console.log("⚠️ No valid token found in /check-session. Clearing cookie.");
+      return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+  }
+});
 
 app.get('/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] }));
@@ -933,7 +970,7 @@ app.get('/testing', async (req, res) => {
   res.json(mediaJson);
 });
 
-app.get('/initialize', (req, res) => {
+app.get('/initialize0', (req, res) => {
   console.log('🟢 Initialize endpoint hit');
   let token = req.cookies.jwt;
   if (!token) {
@@ -965,6 +1002,54 @@ app.get('/initialize', (req, res) => {
           res.clearCookie('jwt');
           return res.status(401).json({ error: "Invalid token, please reinitialize." });
       }
+  }
+});
+
+
+app.get('/initialize', async (req, res) => { // Added async
+  console.log('🟢 Initialize endpoint hit');
+
+  // Check if user is already identified by the middleware
+  // Check if user is already identified by the middleware
+  if (req.identifiedUser && req.identifiedUser.userId) {
+    console.log('✅ User already identified:', req.identifiedUser.userId);
+    return res.json({ message: 'User identified', userId: req.identifiedUser.userId });
+  }
+
+
+
+  // If no valid identified user, generate a new one
+  console.log('⚠️ No valid user identified. Generating new anonymous user.');
+  //const anonymousUserId = Math.random().toString(36).substring(2) + Date.now().toString(36); // Make it more unique
+  
+  const anonymousUserId = `anon_${Date.now()}`;
+  console.log('Generated Anonymous User ID:', anonymousUserId);
+  const tokenPayload = { userId: anonymousUserId }; // Only include userId for anonymous
+  const token = jwt.sign(tokenPayload, process.env.TOKEN_SECRET, { expiresIn: '30d' }); // Longer expiry for anonymous?
+
+  console.log('Generated Anonymous JWT Payload:', tokenPayload);
+
+  try {
+    // Insert placeholder for anonymous user
+    // Assumes userId is the primary key (string) and other fields allow NULL
+    const insertQuery = `
+      INSERT INTO users (userId, userName, is_registered)
+      VALUES (?, ?, ?)
+      ON DUPLICATE KEY UPDATE userId=userId`; // Handle potential rare collision, or use UUIDs
+    await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]); // Store anonymous ID
+
+    res.cookie('jwt', token, {
+        httpOnly: true,
+        secure: true, 
+        sameSite: 'None', // Important for cross-site contexts if needed, else 'Lax'
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days expiry for cookie
+    });
+    console.log('✅ Anonymous user initialized and JWT cookie set.');
+    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId });
+
+  } catch (err) {
+      console.error('❌ Error inserting new anonymous user into database:', err);
+      return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
   }
 });
 
@@ -1025,13 +1110,13 @@ app.get('/initialize2', (req, res) => {
 });
 
 
-app.post('/save-preferences', authenticateJWT, (req, res) => {
+app.post('/save-preferences',  (req, res) => {
   const { userId } = req.user;
   const { preferences } = req.body;
   res.json({ message: 'Preferences saved', userId, preferences });
 });
 
-app.get('/get-preferences', authenticateJWT, (req, res) => {
+app.get('/get-preferences',  (req, res) => {
   const { userId } = req.user;
   res.json({ message: 'Preferences retrieved', userId});
 });
@@ -1126,7 +1211,7 @@ async function insertProducts1(jsonData) {
       const oldPriceNumber = old_price ? parseFloat(old_price.replace(',', '.').replace('€', '').trim()) : 0;
       const newPriceNumber = new_price ? parseFloat(new_price.replace(',', '.').replace('€', '').trim()) : 0;
 
-      
+
 
       const productResult = await dbQuery(
         `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url)
@@ -1300,7 +1385,85 @@ app.get("/getStores", (req, res) => {
 });
 
 
-app.get("/isFavorite", (req, res) => {
+app.get("/isFavorite", async (req, res) => { // Added async
+  // Allow checking even if not identified, will just return false
+  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
+  const { productId } = req.query;
+
+  if (!userId || !productId) {
+     // Cannot check favorite without user and product ID
+     // Technically could check productId only, but usually it's user-specific
+     return res.status(200).json({ isFavorite: false }); // Return false if no user or product ID
+  }
+
+  const q = `SELECT favoriteId FROM favorites WHERE userId = ? AND productId = ?`;
+  try {
+      const result = await queryPromise(q, [userId, productId]);
+      const isFavorite = result.length > 0;
+      res.status(200).json({ isFavorite });
+  } catch (err) {
+      console.error('Error checking favorite:', err);
+      return res.status(500).json({ error: 'Failed to check favorite status' });
+  }
+});
+
+
+app.post("/addFavorite", async (req, res) => { // Added async
+
+  console.log('Add favorite endpoint hit...');
+
+  let userId = req.identifiedUser ? req.identifiedUser.userId : null;
+
+  console.log(' add favorites with User ID:', userId);
+
+  const { productId } = req.body;
+
+    // Generate an anonymous userId if none is provided
+    if (!userId) {
+      console.log("[DEBUG] No userId provided, generating anonymous user...");
+      userId = `anon_${Date.now()}`; // Example: Generate a unique anonymous ID
+    }
+
+  if (!productId) {
+     return res.status(400).json({ error: 'Product ID is required.' });
+  }
+
+  const q = `INSERT IGNORE INTO favorites (userId, productId) VALUES (?, ?)`; // Use INSERT IGNORE
+
+  //console.log('SQL Query:', q);
+  try {
+      await queryPromise(q, [userId, productId]);
+      res.status(200).json({ message: 'Favorite added successfully (or already existed)' });
+  } catch (err) {
+       console.error('Error adding favorite:', err);
+       return res.status(500).json({ error: 'Failed to add favorite' });
+  }
+});
+
+app.delete("/removeFavorite", async (req, res) => { // Added async
+  if (!req.identifiedUser || !req.identifiedUser.userId) {
+    return res.status(401).json({ error: 'User identification required to remove favorites.' });
+  }
+  const { userId } = req.identifiedUser;
+  // Get productId from request body OR query parameters
+  const productId = req.body.productId || req.query.productId;
+
+   if (!productId) {
+     return res.status(400).json({ error: 'Product ID is required.' });
+  }
+
+  const q = `DELETE FROM favorites WHERE userId = ? AND productId = ?`;
+  try {
+      await queryPromise(q, [userId, productId]);
+      res.status(200).json({ message: 'Favorite removed successfully' });
+  } catch (err) {
+       console.error('Error removing favorite:', err);
+       return res.status(500).json({ error: 'Failed to remove favorite' });
+  }
+});
+
+
+app.get("/isFavorite0", (req, res) => {
   const { userId, productId } = req.query;
   const q = `SELECT * FROM favorites WHERE userId = ? AND productId = ?`;
   db.query(q, [userId, productId], (err, result) => {
@@ -1314,7 +1477,7 @@ app.get("/isFavorite", (req, res) => {
 });
 
 
-app.post("/addFavorite", (req, res) => {
+app.post("/addFavorite0", (req, res) => {
   console.log('Add favorite endpoint hit');
   console.log('Request body:', req.body);
   const { userId, productId } = req.body;
@@ -1328,7 +1491,7 @@ app.post("/addFavorite", (req, res) => {
   });
 });
 
-app.delete("/removeFavorite", (req, res) => {
+app.delete("/removeFavorite0", (req, res) => {
   const { userId, productId } = req.body;
   const q = `DELETE FROM favorites WHERE userId = ? AND productId = ?`;
   db.query(q, [userId, productId], (err, result) => {
@@ -1502,9 +1665,124 @@ app.put("/editStore", (req, res) => {
   });
 });
 
-app.get("/getProducts", async (req, res) => {
+
+// --- MODIFIED: /getProducts endpoint ---
+app.get("/getProducts", async (req, res) => { // Added async
   console.log('getProducts endpoint hit');
-  const userId = parseInt(req.query.userId, 10) || null;
+  // Get userId from middleware if available
+  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
+  // ... rest of your parameter parsing (storeId, isFavorite query param, etc.)
+  let storeId = parseInt(req.query.storeId, 10);
+  const isFavoriteQueryParam = req.query.isFavorite === 'true'; // Check query param specifically
+  const onSale = req.query.onSale === 'true';
+  const keyword = req.query.keyword || null;
+  const page = parseInt(req.query.page, 10) || 1;
+  const limit = parseInt(req.query.limit, 10) || 20; // Use base 10
+  const offset = (page - 1) * limit;
+  const today = new Date().toISOString().split('T')[0];
+
+
+
+  ///////
+
+
+
+  //////
+
+  if (isNaN(storeId) || storeId <= 0) {
+      storeId = null;
+  }
+
+  // Base query structure
+  // We select isFavorite based on the CURRENT identified user (if any)
+  let q = `
+    SELECT
+      p.productId, p.product_description, p.old_price, p.new_price,
+      p.discount_percentage, p.sale_end_date, p.storeId, p.image_url,
+      s.storeName,
+      GROUP_CONCAT(DISTINCT k.keyword SEPARATOR ',') AS keywords,
+      ${userId ? 'CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END' : 'FALSE'} AS isFavorite,
+      CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale
+      /* Removed keywordMatchCount for simplicity, can be added back if needed */
+    FROM
+      products p
+    LEFT JOIN stores s ON p.storeId = s.storeId
+    LEFT JOIN productkeywords pk ON p.productId = pk.productId
+    LEFT JOIN keywords k ON pk.keywordId = k.keywordId
+    ${userId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}
+  `;
+
+  // Parameters start with 'today' for productOnSale comparison
+  const params = [today];
+  if (userId) {
+      params.push(userId); // Add userId for the LEFT JOIN on favorites
+  }
+
+  let conditions = [];
+
+  if (storeId !== null) {
+      conditions.push(`p.storeId = ?`);
+      params.push(storeId);
+  }
+
+  // Filter by favorites *only if* the query parameter is set AND a user is identified
+  if (isFavoriteQueryParam && userId) {
+      console.log('Filtering by favorites for user:', userId);
+      // Need to ensure the product is favorited by the current user.
+      // A subquery or JOIN condition is needed here. Let's use EXISTS.
+      conditions.push(`EXISTS (SELECT 1 FROM favorites fav_sub WHERE fav_sub.productId = p.productId AND fav_sub.userId = ?)`);
+      params.push(userId); // Add userId again for this specific condition
+  }
+
+  if (onSale) {
+      conditions.push(`p.sale_end_date >= ?`);
+      params.push(today);
+  }
+
+  if (keyword) {
+      // Ensure keywords are searched across products even without linking to productkeywords again
+      // Check product_description OR keywords table
+       const keywords = keyword.split(' ').map(kw => kw.trim()).filter(kw => kw.length > 1);
+       if (keywords.length > 0) {
+           const keywordConditions = keywords.map(() => `k.keyword LIKE ?`).join(' OR ');
+           const descriptionConditions = keywords.map(() => `p.product_description LIKE ?`).join(' OR ');
+           conditions.push(`((${keywordConditions}) OR (${descriptionConditions}))`);
+           // Add params for keywords table search
+           params.push(...keywords.map(kw => `%${kw}%`));
+           // Add params for description search
+           params.push(...keywords.map(kw => `%${kw}%`));
+       }
+  }
+
+  if (conditions.length > 0) {
+      q += ' WHERE ' + conditions.join(' AND ');
+  }
+
+  q += `
+    GROUP BY p.productId
+    ORDER BY p.productId DESC /* Adjust ordering as needed */
+    LIMIT ? OFFSET ?
+  `;
+  params.push(limit, offset);
+
+  try {
+    const data = await queryPromise(q, params);
+    const nextPage = data.length === limit ? page + 1 : null;
+    return res.json({ data, nextPage });
+  } catch(err) {
+    console.log("getProducts error:", err);
+    // Avoid sending raw DB error to client
+    return res.status(500).json({ error: "Failed to retrieve products" });
+  }
+});
+
+app.get("/getProducts0", async (req, res) => {
+  console.log('getProducts endpoint hit');
+
+
+  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
+
+  //const userId = parseInt(req.query.userId, 10) || null;
   let storeId = parseInt(req.query.storeId, 10);
   const isFavorite = req.query.isFavorite || null;
   const onSale = req.query.onSale || null;
@@ -1558,7 +1836,9 @@ app.get("/getProducts", async (req, res) => {
   `;
 
   const params = [today, userId, userId];
+
   let conditions = [];
+  
   if (storeId !== null) {
     conditions.push(`p.storeId = ?`);
     params.push(storeId);
@@ -1959,6 +2239,7 @@ app.post('/upload0', upload.array('images', 10), async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to upload image' });
   }
 });
+
 
 
 const port = process.env.PORT || 3000;
