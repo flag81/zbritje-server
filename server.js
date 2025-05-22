@@ -646,11 +646,12 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
   // Replace with your actual way of getting userId
   const userId = req.user ? req.user.userId : 1; // Example: Get from req.user if using auth middleware, default to 1
 
-  const { saleEndDate, storeId } = req.body;
+  const { saleEndDate, storeId, flyerBookId } = req.body;
   console.log('Sale End Date:', saleEndDate);
   console.log('Store ID:', storeId);
   console.log('User ID:', userId); // Log userId
   console.log('Image file:', req.file);
+  console.log('flyerBookId:', flyerBookId);
 
   try {
     if (!req.file) {
@@ -708,7 +709,7 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
     // 2️⃣ Format and Extract data using Gemini 1.5 Pro directly from the image URL
     console.log('▶️  Formatting and extracting data from image using Gemini 1.5 Pro…');
     // Pass the image URL directly to formatDataToJson
-    const jsonText = await formatDataToJson(imageUrl, imageUrl, saleEndDate, storeId, userId); // Pass imageUrl as data source and metadata
+    const jsonText = await formatDataToJson(imageUrl, imageUrl, saleEndDate, storeId, userId, flyerBookId); // Pass imageUrl as data source and metadata
     console.log('✅ Formatted JSON from Gemini:', jsonText);
 
     // 3️⃣ Cleanup
@@ -733,180 +734,11 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
 });
 
 
-// Keeping other extract-text routes for now, but they are not using the new Gemini image analysis
-app.post('/extract-text0000', upload.single('image'), async (req, res) => {
-  console.log('🔍 Extracting text from image…');
-
-  const { saleEndDate, storeId } = req.body;
-  console.log('Sale End Date:', saleEndDate);
-  console.log('Store ID:', storeId);
-  console.log('Image file:', req.file);
-
-  try {
-    if (!req.file) {
-      console.error('❌ No image file provided.');
-      return res.status(400).json({ message: 'No image file provided.' });
-    }
-
-    const imagePath = req.file.path;
-    console.log(`🛣️  Local path: ${imagePath}`);
-
-    console.log('▶️  Uploading to Cloudinary…');
-    const uploadedImage = await cloudinary.uploader.upload(imagePath, {
-      folder: 'uploads',
-      public_id: req.file.originalname.split('.')[0],
-      resource_type: 'image',
-      overwrite: true,
-    });
-    const imageUrl = uploadedImage.secure_url;
-    console.log('✅ Uploaded URL:', imageUrl);
-
-    // 3️⃣ OCR with Google Vision - Using DOCUMENT_TEXT_DETECTION
-    console.log('▶️  Running DOCUMENT_TEXT_DETECTION on Google Vision…');
-
-    const request = {
-      image: { source: { imageUri: imageUrl } },
-      features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-      imageContext: {
-         languageHints: ['sq']
-      }
-    };
-
-    const [visionResult] = await client.annotateImage(request);
-    const fullTextAnnotation = visionResult.fullTextAnnotation;
-    const extractedText = fullTextAnnotation ? fullTextAnnotation.text : '';
-
-    console.log('✅ Extracted text (DOCUMENT_TEXT_DETECTION):', extractedText);
-
-    // 4️⃣ Format to JSON
-    console.log('▶️  Formatting text to JSON…');
-    // This formatDataToJson call still expects raw text
-    const jsonText = await formatDataToJson(extractedText, imageUrl, saleEndDate, storeId);
-    console.log('✅ Formatted JSON:', jsonText);
-
-    // 5️⃣ Cleanup
-    fs.unlinkSync(imagePath);
-    console.log('✅ Deleted temp file');
-
-    // 6️⃣ Respond
-    return res.json({ extractedText, jsonText, imageUrl });
-
-  } catch (err) {
-    console.error('❌ Error in /extract-text route:', err);
-    return res.status(500).json({
-      message: 'Failed to extract text from image.',
-      error: err.message
-    });
-  }
-});
 
 
-app.post('/extract-text3333', upload.single('image'), async (req, res) => {
-  console.log('🔍 Extracting text from image…');
-
-  const { saleEndDate, storeId } = req.body;
-  console.log('Sale End Date:', saleEndDate);
-  console.log('Store ID:', storeId);
-  console.log('Image file:', req.file);
-
-  try {
-    if (!req.file) {
-      console.error('❌ No image file provided.');
-      return res.status(400).json({ message: 'No image file provided.' });
-    }
-
-    const imagePath = req.file.path;
-    console.log(`🛣️  Local path: ${imagePath}`);
-
-    console.log('▶️  Uploading to Cloudinary…');
-    const uploadedImage = await cloudinary.uploader.upload(imagePath, {
-      folder: 'uploads',
-      public_id: req.file.originalname.split('.')[0],
-      resource_type: 'image',
-      overwrite: true,
-    });
-    const imageUrl = uploadedImage.secure_url;
-    console.log('✅ Uploaded URL:', imageUrl);
-
-    // 3️⃣ OCR with Google Vision
-    console.log('▶️  Running textDetection on Google Vision…');
-    const [visionResult] = await client.textDetection(imageUrl);
-    const detections = visionResult.textAnnotations;
-    const extractedText = detections?.[0]?.description || '';
-    console.log('✅ Extracted text:', extractedText);
-
-    // 4️⃣ Format to JSON
-    console.log('▶️  Formatting text to JSON…');
-     // This formatDataToJson call still expects raw text
-    const jsonText = await formatDataToJson(extractedText, imageUrl, saleEndDate, storeId);
-    console.log('✅ Formatted JSON:', jsonText);
-
-    // 5️⃣ Cleanup
-    fs.unlinkSync(imagePath);
-    console.log('✅ Deleted temp file');
-
-    // 6️⃣ Respond
-    return res.json({ extractedText, jsonText, imageUrl });
-
-  } catch (err) {
-    console.error('❌ Error in /extract-text route:', err);
-    return res.status(500).json({
-      message: 'Failed to extract text from image.',
-      error: err.message
-    });
-  }
-});
 
 
-app.post('/extract-text2', upload.single('image'), async (req, res) => {
-  console.log('🔍 Extracting text from image...');
 
-  try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'No image file provided.' });
-    }
-
-    const imagePath = req.file.path;
-
-    // Upload image to Cloudinary
-    const uploadedImage = await cloudinary.uploader.upload(imagePath, {
-      folder: 'uploads',
-      public_id: req.file.originalname.split('.')[0],
-      resource_type: 'image',
-      overwrite: true,
-    });
-    console.log('✅ Image uploaded to Cloudinary:', uploadedImage.secure_url);
-
-    // Send image to Google Vision API
-    const [result] = await client.textDetection(uploadedImage.secure_url);
-    const detections = result.textAnnotations;
-    let extractedText = '';
-
-    if (detections && detections.length > 0) {
-      extractedText = detections[0].description;
-    }
-
-    console.log('🔍 Extracted text:', extractedText);
-
-     // This formatDataToJson call still expects raw text
-    const jsonText = await formatDataToJson(extractedText, uploadedImage.secure_url);
-
-    console.log('🔍 Formated json data:', jsonText);
-
-    // Delete temporary uploaded file from server
-    fs.unlinkSync(imagePath);
-
-    res.json({
-      extractedText: extractedText,
-      jsonText: jsonText,
-      imageUrl: uploadedImage.secure_url
-    });
-
-  } catch (error) {
-    console.error('❌ Error extracting text:', error);
-    res.status(500).json({ message: 'Failed to extract text from the image.' });
-  }
-});
 
 
 async function listAllMediaFiles() {
@@ -1154,24 +986,7 @@ app.delete('/deleteProduct/:productId', async (req, res) => {
   }
 });
 
-app.post('/insertProducts', (req, res) => {
-  const products = req.body;
-  if (Array.isArray(products)) {
-    products.forEach(product => {
-      console.log('Product Description:', product.product_description);
-      console.log('Old Price:', product.old_price);
-      console.log('New Price:', product.new_price);
-      console.log('Discount Percentage:', product.discount_percentage);
-      console.log('Sale End Date:', product.sale_end_date);
-      console.log('Store ID:', product.storeId);
-      console.log('Keywords:', product.keywords.join(', '));
-      console.log('---');
-    });
-    res.status(200).json({ message: 'Products processed successfully' });
-  } else {
-    res.status(400).json({ message: 'Invalid data format. Expected an array of products.' });
-  }
-});
+
 
 
 async function insertProducts1(jsonData) {
@@ -1202,7 +1017,7 @@ async function insertProducts1(jsonData) {
   try {
     await dbQuery('START TRANSACTION');
     for (const product of products) {
-      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id } = product;
+      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id } = product;
       console.log('Processing product:', product_description);
 
       // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
@@ -1214,9 +1029,9 @@ async function insertProducts1(jsonData) {
 
 
       const productResult = await dbQuery(
-        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id]
+        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id ]
       );
 
       const productId = productResult.insertId;
@@ -1263,9 +1078,9 @@ async function insertProducts1(jsonData) {
 
 
 // **UPDATED** formatDataToJson function to work with image URL
-async function formatDataToJson(imageUrl, originalImageUrl, saleEndDate, storeId, userId) { // Accepts imageUrl as data source
+async function formatDataToJson(imageUrl, originalImageUrl, saleEndDate, storeId, userId, flyerBookId) { // Accepts imageUrl as data source
   console.log('🔍 Formatting data into JSON using Gemini 1.5 Pro from image URL...');
-  console.log('Metadata received: Image URL:', originalImageUrl, 'Sale End Date:', saleEndDate, 'Store ID:', storeId, 'User ID:', userId);
+  console.log('Metadata received: Image URL:', originalImageUrl, 'Sale End Date:', saleEndDate, 'Store ID:', storeId, 'User ID:', userId , 'flyerBookId:', flyerBookId);
 
   const geminiPrompt = `You are an AI assistant that specializes in extracting structured product sale information from an image of an Albanian 
   retail flyer.
@@ -1371,6 +1186,7 @@ For each distinct product entry you identify in the image, create a JSON object 
 * \`userId\` (number): Use the provided value: ${userId}.
 * \`image_url\` (string): Use the provided value: "${originalImageUrl}".
 * \`category_id\` (number or null): The numerical value of the categoryId extract from categories array.\`.
+*\`flyer_book_id\` (number or null): Use the provided value: "${flyerBookId}".\`.
 
 Also, generate a list of relevant keywords for each product description. These keywords should be in lowercase, in Albanian, 
 and exclude common articles, conjunctions, prepositions, and size/volume information (like 'kg', 'l', 'pako', numbers, units). 
@@ -1384,82 +1200,6 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 `;
 
 
-const productCategories = [
-  {"categoryId": 100, "categoryDescription": "Fruits (Fruta)", "categoryWeight": 80},
-  {"categoryId": 101, "categoryDescription": "Vegetables (Perime)", "categoryWeight": 80},
-  {"categoryId": 102, "categoryDescription": "Herbs (Erëza të Freskëta)", "categoryWeight": 80},
-  {"categoryId": 103, "categoryDescription": "Red Meat (Mish i Kuq)", "categoryWeight": 62},
-  {"categoryId": 104, "categoryDescription": "Poultry (Shpendë)", "categoryWeight": 62},
-  {"categoryId": 105, "categoryDescription": "Processed Meats (Mishra të Përpunuar)", "categoryWeight": 59},
-  {"categoryId": 106, "categoryDescription": "Fresh Fish (Peshk i Freskët)", "categoryWeight": 38},
-  {"categoryId": 107, "categoryDescription": "Frozen Fish & Seafood (Peshk dhe Fruta Deti të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 108, "categoryDescription": "Canned Fish (Peshk i Konservuar)", "categoryWeight": 65},
-  {"categoryId": 109, "categoryDescription": "Milk (Qumësht)", "categoryWeight": 82},
-  {"categoryId": 110, "categoryDescription": "Yogurt (Kos / Jogurt)", "categoryWeight": 82},
-  {"categoryId": 111, "categoryDescription": "Cheese (Djathë)", "categoryWeight": 82},
-  {"categoryId": 112, "categoryDescription": "Cream (Ajkë / Krem Qumështi)", "categoryWeight": 82},
-  {"categoryId": 113, "categoryDescription": "Butter (Gjalpë)", "categoryWeight": 82},
-  {"categoryId": 114, "categoryDescription": "Margarine & Spreads (Margarinë dhe Produkte për Lyerje)", "categoryWeight": 64},
-  {"categoryId": 115, "categoryDescription": "Eggs (Vezë)", "categoryWeight": 82},
-  {"categoryId": 116, "categoryDescription": "Bread (Bukë)", "categoryWeight": 71},
-  {"categoryId": 117, "categoryDescription": "Pastries & Croissants (Pasta dhe Kroasante)", "categoryWeight": 71},
-  {"categoryId": 118, "categoryDescription": "Cakes & Sweet Baked Goods (Kekë dhe Ëmbëlsira Furre)", "categoryWeight": 71},
-  {"categoryId": 119, "categoryDescription": "Flour (Miell)", "categoryWeight": 47},
-  {"categoryId": 120, "categoryDescription": "Rice (Oriz)", "categoryWeight": 65},
-  {"categoryId": 121, "categoryDescription": "Pasta & Noodles (Makarona dhe Fide)", "categoryWeight": 65},
-  {"categoryId": 122, "categoryDescription": "Grains & Cereals (Drithëra)", "categoryWeight": 66},
-  {"categoryId": 123, "categoryDescription": "Sugar & Sweeteners (Sheqer dhe Ëmbëltues)", "categoryWeight": 47},
-  {"categoryId": 124, "categoryDescription": "Salt & Spices (Kripë dhe Erëza)", "categoryWeight": 47},
-  {"categoryId": 125, "categoryDescription": "Cooking Oils (Vajra Gatimi)", "categoryWeight": 64},
-  {"categoryId": 126, "categoryDescription": "Vinegar (Uthull)", "categoryWeight": 64},
-  {"categoryId": 127, "categoryDescription": "Canned Goods (Konserva)", "categoryWeight": 65},
-  {"categoryId": 128, "categoryDescription": "Sauces & Condiments (Salca dhe Kondimente)", "categoryWeight": 64},
-  {"categoryId": 129, "categoryDescription": "Spreads (Produkte për Lyerje)", "categoryWeight": 64},
-  {"categoryId": 130, "categoryDescription": "Chips & Crisps (Çipsa dhe Patatina)", "categoryWeight": 76},
-  {"categoryId": 131, "categoryDescription": "Pretzels & Salty Snacks (Shkopinj të Kripur dhe Rosto të Tjera)", "categoryWeight": 76},
-  {"categoryId": 132, "categoryDescription": "Nuts & Seeds (Fruta të Thata dhe Fara)", "categoryWeight": 76},
-  {"categoryId": 133, "categoryDescription": "Chocolate (Çokollatë)", "categoryWeight": 43},
-  {"categoryId": 134, "categoryDescription": "Biscuits & Cookies (Biskota dhe Keksa)", "categoryWeight": 76},
-  {"categoryId": 135, "categoryDescription": "Candies & Gums (Karamele dhe Çamçakëz)", "categoryWeight": 43},
-  {"categoryId": 136, "categoryDescription": "Frozen Vegetables & Fruits (Perime dhe Fruta të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 137, "categoryDescription": "Frozen Potato Products (Produkte Patatesh të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 138, "categoryDescription": "Frozen Ready Meals & Pizza (Gatime të Gata dhe Pica të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 139, "categoryDescription": "Frozen Meat & Fish (Mish dhe Peshk i Ngrirë)", "categoryWeight": 70},
-  {"categoryId": 140, "categoryDescription": "Ice Cream (Akullore)", "categoryWeight": 70},
-  {"categoryId": 141, "categoryDescription": "Baby Food (Ushqim për Foshnje)", "categoryWeight": 7},
-  {"categoryId": 142, "categoryDescription": "Baby Formula (Qumësht Formule)", "categoryWeight": 7},
-  {"categoryId": 143, "categoryDescription": "Water (Ujë)", "categoryWeight": 53},
-  {"categoryId": 144, "categoryDescription": "Still Water (Ujë Natyral / pa Gaz)", "categoryWeight": 53},
-  {"categoryId": 145, "categoryDescription": "Sparkling Water (Ujë Mineral / me Gaz)", "categoryWeight": 53},
-  {"categoryId": 146, "categoryDescription": "Flavored Water (Ujë me Shije)", "categoryWeight": 53},
-  {"categoryId": 147, "categoryDescription": "Fruit Juices (Lëngje Frutash)", "categoryWeight": 53},
-  {"categoryId": 148, "categoryDescription": "Nectars (Nektare)", "categoryWeight": 53},
-  {"categoryId": 149, "categoryDescription": "Smoothies (Smoothie)", "categoryWeight": 53},
-  {"categoryId": 150, "categoryDescription": "Colas (Kola)", "categoryWeight": 53},
-  {"categoryId": 151, "categoryDescription": "Other Carbonated Drinks (Pije të Tjera të Gazuara)", "categoryWeight": 53},
-  {"categoryId": 152, "categoryDescription": "Coffee (Kafe)", "categoryWeight": 53},
-  {"categoryId": 153, "categoryDescription": "Tea (Çaj)", "categoryWeight": 53},
-  {"categoryId": 154, "categoryDescription": "Energy Drinks (Pije Energjetike)", "categoryWeight": 53},
-  {"categoryId": 155, "categoryDescription": "Alcoholic Beverages (Pije Alkoolike)", "categoryWeight": 29},
-  {"categoryId": 156, "categoryDescription": "Beer (Birrë)", "categoryWeight": 29},
-  {"categoryId": 157, "categoryDescription": "Wine (Verë)", "categoryWeight": 29},
-  {"categoryId": 158, "categoryDescription": "Spirits (Pije Spirtuore)", "categoryWeight": 29},
-  {"categoryId": 159, "categoryDescription": "Laundry Detergents (Detergjentë Rrobash)", "categoryWeight": 59},
-  {"categoryId": 160, "categoryDescription": "Fabric Softeners (Zbutës Rrobash)", "categoryWeight": 59},
-  {"categoryId": 161, "categoryDescription": "Dishwashing Products (Produkte për Larjen e Enëve)", "categoryWeight": 59},
-  {"categoryId": 162, "categoryDescription": "Surface Cleaners (Pastrues Sipërfaqesh)", "categoryWeight": 59},
-  {"categoryId": 163, "categoryDescription": "Toilet Cleaners (Pastrues WC)", "categoryWeight": 59},
-  {"categoryId": 164, "categoryDescription": "Garbage Bags (Thasë Mbeturinash)", "categoryWeight": 59},
-  {"categoryId": 165, "categoryDescription": "Soaps & Shower Gels (Sapunë dhe Xhel Dushi)", "categoryWeight": 50},
-  {"categoryId": 166, "categoryDescription": "Shampoos & Conditioners (Shampon dhe Balsam Flokësh)", "categoryWeight": 50},
-  {"categoryId": 167, "categoryDescription": "Oral Care (Kujdesi Oral)", "categoryWeight": 50},
-  {"categoryId": 168, "categoryDescription": "Deodorants & Antiperspirants (Deodorantë)", "categoryWeight": 50},
-  {"categoryId": 169, "categoryDescription": "Skin Care (Kujdesi i Lëkurës)", "categoryWeight": 50},
-  {"categoryId": 170, "categoryDescription": "Feminine Hygiene (Higjiena Femërore)", "categoryWeight": 50},
-  {"categoryId": 171, "categoryDescription": "Paper Products (Produkte Letre)", "categoryWeight": 59},
-  {"categoryId": 172, "categoryDescription": "Baby Diapers & Wipes (Pelena dhe Letra të Lagura për Foshnje)", "categoryWeight": 7},
-  {"categoryId": 173, "categoryDescription": "Other", "categoryWeight": 1}
-];
 
 
 /*
@@ -1560,6 +1300,27 @@ app.get("/getStores", (req, res) => {
     return res.json(data);
   });
 });
+
+// api to get all the image_url that have the same flyer_book_id 
+
+app.get("/getImagesByFlyerBookId", (req, res) => {
+
+  const flyerBookId = req.query.flyerBookId;
+
+  // SELECT ONLY DISTINCT image_url FROM products WHERE flyer_book_id = ?
+
+  const q = `SELECT DISTINCT image_url FROM products WHERE flyer_book_id = ?`;
+
+  db.query(q, [flyerBookId], (err, data) => {
+    if (err) {
+      console.log("getImagesByFlyerBookId error:", err);
+      return res.json(err);
+    }
+    return res.json(data);
+  }
+  );
+});
+
 
 
 app.get("/isFavorite", async (req, res) => { // Added async
@@ -1856,7 +1617,7 @@ app.get("/getProducts", async (req, res) => {
     SELECT
       p.productId, p.product_description, p.old_price, p.new_price,
       p.discount_percentage, p.sale_end_date, p.storeId, p.image_url,
-      s.storeName, 
+      s.storeName, p.flyer_book_id,
       ANY_VALUE(pc.categoryWeight) AS categoryWeight,
       GROUP_CONCAT(DISTINCT k.keyword SEPARATOR ',') AS keywords,
       ${matchedKeywordCountSelectSQL},
@@ -1914,7 +1675,7 @@ app.get("/getProducts", async (req, res) => {
        For safety, ensure all non-aggregated SELECT columns (that aren't functionally dependent on p.productId)
        would be included if not for the subquery. Here, the subquery IS dependent on p.productId.
     */
-    ORDER BY matched_keyword_count DESC,  categoryWeight DESC, productOnSale DESC , p.productId DESC
+    ORDER BY matched_keyword_count DESC,  productOnSale DESC , categoryWeight DESC, p.productId DESC
     LIMIT ? OFFSET ?
   `;
 
