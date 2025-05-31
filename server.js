@@ -64,8 +64,20 @@ const privateKey = fs.readFileSync(privateKeyPath, "utf8");
 // });
 
 
+import { ApifyClient } from 'apify-client';
+
+
+// Initialize Apify client with your token
+const apify = new ApifyClient({
+  token: process.env.APIFY_TOKEN  // Replace with your Apify API token
+});
+
+
+console.log('✅ Apify client initialized in server.js', process.env.APIFY_TOKEN );
+
 import { format } from 'path';
 import db from './connection.js';
+
 
 import cookieParser from 'cookie-parser';
 import bodyParser from'body-parser';
@@ -112,6 +124,7 @@ app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUniniti
 }));
 
 
+
 passport.use(
   new GoogleStrategy(
       {
@@ -136,19 +149,14 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 
-// Apple Sign-In Route (keeping these as they are authentication related)
-app.get(
-  "/auth/apple222",
-  passport.authenticate("apple", { scope: ["email", "name"] }),
-  (req, res) => {
-    console.log("🍏 Apple OAuth Callback Triggered");
-  }
-);
+//
 
-app.get("/auth/apple44444", (req, res) => {
-  const appleRedirectUrl = `https://appleid.apple.com/auth/authorize?response_type=code%20id_token&client_id=${process.env.APPLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.APPLE_CALLBACK_URL)}&scope=name%20email&response_mode=form_post`;
-  res.redirect(appleRedirectUrl);
-});
+
+
+
+// Apple Sign-In Route (keeping these as they are authentication related)
+
+
 
 
 const generateAppleClientSecret = () => {
@@ -299,128 +307,8 @@ app.post("/auth/apple/callback", async (req, res) => {
 });
 
 
-app.post("/auth/apple/callback121212", async (req, res) => {
-  try {
-    console.log("🍏 Apple OAuth Callback Triggered");
-    const { code, id_token } = req.body;
-
-    if (!code && !id_token) {
-      console.error("❌ No authorization code or ID token received.");
-      return res.status(400).json({ error: "No authorization code provided" });
-    }
-
-    const clientSecret = generateAppleClientSecret();
-    const appleResponse = await AppleSigninAuth.getAuthorizationToken(code, {
-      clientID: process.env.APPLE_CLIENT_ID,
-      clientSecret: clientSecret,
-      redirectURI: process.env.APPLE_CALLBACK_URL,
-    });
-    const decodedToken = jwt.decode(appleResponse.id_token);
-    const appleId = decodedToken.sub;
-    const email = decodedToken.email || null;
-    res.json({ user: decodedToken, accessToken: appleResponse.access_token });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Apple Sign-in failed" });
-  }
-});
 
 
-app.post("/auth/apple/callback33", async (req, res) => {
-  try {
-      console.log("🍏 Apple OAuth Callback Triggered");
-      const { id_token } = req.body;
-      if (!id_token) {
-          console.error("❌ No ID token received.");
-          return res.status(400).json({ error: "Missing ID token" });
-      }
-
-      const appleKeys = await axios.get("https://appleid.apple.com/auth/keys");
-      const applePublicKeys = appleKeys.data.keys;
-      const decodedHeader = jwt.decode(id_token, { complete: true });
-      if (!decodedHeader) {
-          console.error("❌ Failed to decode Apple ID token.");
-          return res.status(400).json({ error: "Invalid ID token" });
-      }
-
-      const key = applePublicKeys.find(k => k.kid === decodedHeader.header.kid);
-      if (!key) {
-          console.error("❌ No matching Apple key found.");
-          return res.status(400).json({ error: "Invalid Apple key" });
-      }
-
-      const verifiedPayload = jwt.verify(id_token, jwt.jwkToPem(key), { algorithms: ["RS256"] });
-      console.log("✅ Apple ID Token Verified:", verifiedPayload);
-
-      const appleId = verifiedPayload.sub;
-      let email = verifiedPayload.email || null;
-
-      console.log(`🍏 Received AppleID: ${appleId}, Email: ${email || "No email provided"}`);
-
-      const checkQuery = `SELECT userId, email FROM users WHERE userId = ? OR email = ?`;
-      db.query(checkQuery, [appleId, email], (err, results) => {
-          if (err) {
-              console.error("❌ Database error:", err);
-              return res.status(500).json({ error: "Database error" });
-          }
-
-          if (results.length > 0) {
-              const existingUser = results[0];
-              console.log(`✅ Existing user found: userId=${existingUser.userId}, email=${existingUser.email || "No email"}`);
-
-              if (!existingUser.email && email) {
-                  const updateQuery = `UPDATE users SET email = ? WHERE userId = ?`;
-                  db.query(updateQuery, [email, existingUser.userId], (updateErr) => {
-                      if (updateErr) {
-                          console.error("❌ Error updating email:", updateErr);
-                          return res.status(500).json({ error: "Failed to update email" });
-                      }
-                      console.log(`✅ Email updated for userId=${existingUser.userId}`);
-                  });
-              }
-
-              const token = jwt.sign(
-                  { userId: existingUser.userId, email: existingUser.email || email },
-                  process.env.TOKEN_SECRET,
-                  { expiresIn: "7d" }
-              );
-
-              res.cookie("jwt", token, {
-                  httpOnly: true,
-                  secure: true,
-                  sameSite: "None",
-                  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-              });
-
-              return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
-          } else {
-              console.log(`🆕 New user detected, inserting: ${email || "No email provided"}`);
-              const insertQuery = `INSERT INTO users (userId, email) VALUES (?, ?)`;
-              db.query(insertQuery, [appleId, email], (insertErr) => {
-                  if (insertErr) {
-                      console.error("❌ Error inserting new user:", insertErr);
-                      return res.status(500).json({ error: "Failed to insert new user" });
-                  }
-
-                  console.log(`✅ New user inserted: AppleID=${appleId}, Email=${email || "No email"}`);
-                  const token = jwt.sign({ userId: appleId, email }, process.env.TOKEN_SECRET, { expiresIn: "7d" });
-
-                  res.cookie("jwt", token, {
-                      httpOnly: true,
-                      secure: true,
-                      sameSite: "None",
-                      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                  });
-
-                  return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
-              });
-          }
-      });
-  } catch (error) {
-      console.error("❌ Apple OAuth Error:", error);
-      return res.status(500).json({ error: "Apple authentication failed" });
-  }
-});
 
 
 // Specify the model you want to use (e.g., Gemini 1.5 Pro)
@@ -490,30 +378,113 @@ app.post('/dashboardLogin', (req, res) => {
   });
 });
 
-app.get("/check-session0",  (req, res) => {
-  const token = req.cookies.jwt;
-  if (!token) {
-      return res.json({ isLoggedIn: false, userId: null });
+
+app.get('/get-facebook-posts', async (req, res) => {
+
+
+  const { pageUrl, date } = req.query;
+
+  console.log(`🔍 Fetching Facebook posts for page: ${pageUrl} on date: ${date}`);
+
+  if (!pageUrl || !date) {
+    return res.status(400).json({ error: 'Missing pageUrl or date (YYYY-MM-DD)' });
   }
 
   try {
-      const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-      const query = `SELECT userId, email FROM users WHERE userId = ?`;
-      db.query(query, [decoded.userId], (err, results) => {
-          if (err) {
-              console.error("❌ Error retrieving user:", err);
-              return res.status(500).json({ isLoggedIn: false, userId: null });
-          }
-          if (results.length === 0) {
-              console.warn("⚠️ User not found in database");
-              return res.json({ isLoggedIn: false, userId: null });
-          }
-          res.json({ isLoggedIn: true, userId: results[0].userId, email: results[0].email });
-      });
-  } catch (error) {
-      console.error("❌ Invalid JWT:", error.message);
-      res.clearCookie("jwt");
-      return res.json({ isLoggedIn: false, userId: null });
+    // Run Apify Facebook Posts Scraper
+    const run = await apify.actor('apify/facebook-posts-scraper').call({
+      startUrls: [{ url: pageUrl }],
+      maxPosts: 10,
+      proxy: { useApifyProxy: true },
+    });
+
+    // Get results
+    const { items } = await apify.dataset(run.defaultDatasetId).listItems();
+
+    console.log(`📄 Fetched ${items.length} posts from Facebook page: ${pageUrl}`)
+    console.log(`📄 Items:`, items);
+
+    // Filter by date
+    const matchingPosts = items.filter(post => {
+      const postDate = new Date(post.timestamp * 1000).toISOString().split('T')[0];
+      return postDate === date;
+    });
+
+    // Format output
+    const result = matchingPosts.map(post => ({
+      text: post.text || '',
+      postUrl: post.postUrl || '',
+      date: new Date(post.timestamp * 1000).toISOString(),
+      images: post.images || [],
+    }));
+
+    return res.json({
+      total: result.length,
+      date,
+      pageUrl,
+      posts: result,
+    });
+
+  } catch (err) {
+    console.error('Error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch posts', details: err.message });
+  }
+});
+
+
+// API endpoint to get Facebook photo URLs for a specific date
+app.get('/get-facebook-photos', async (req, res) => {
+
+
+ // console.log(`🔍 Fetching Facebook photos for page: ${pageUrl} on date: ${date}`);
+
+
+
+  console.log(`🔍 Fetching Facebook photos ....`);
+
+  const page1 = 'https://www.facebook.com/vivafresh.rks';
+  const page2 = 'https://www.facebook.com/etcks'  ;
+  const page3 =   'https://www.facebook.com/SPARinKosova' ;
+  const page4 = 'https://www.facebook.com/profile.php?id=100040544017359'; // Example page URL
+
+
+  
+
+
+
+  try {
+    const input = {
+      startUrls: [
+        { url: `${page1}/photos` },
+        { url: `${page2}/photos` },
+        { url: `${page3}/photos` },
+        { url: `${page4}/photos` },
+      ],
+      resultsLimit: 10,
+      proxy: {
+        useApifyProxy: true,
+        apifyProxyGroups: ['RESIDENTIAL'],
+      },
+    };
+
+    // Run the actor
+    const run = await apify.actor('apify/facebook-photos-scraper').call(input);
+
+    // Fetch dataset items
+    const { items } = await apify.dataset(run.defaultDatasetId).listItems();
+
+
+    console.log(`📸 Fetched ${items.length} items from Facebook.`);
+    console.log(`📸 Items:`, items);
+
+
+
+    res.json({
+      items: items
+    });
+  } catch (err) {
+    console.error('Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch photos', details: err.message });
   }
 });
 
@@ -1194,6 +1165,7 @@ Only include words longer than 2 characters. Convert the Albanian letter 'ë' to
 If there is a keyword like "qumesht" or "qumësht" add a keyword "qumsht" as well to cover both spellings.
 if there is a keyword like "veze" add a keyword "vo" as well to cover both spellings.
 if there is a keyword like "shalqi*" add a keyword "bostan" as well to cover both spellings.
+if there is a keyword like "ver*" add a keyword "vene" as well to cover both spellings.
 if there is a keyword like "qepe" add a keyword "kep" as well to cover both spellings.
 The \`keywords\` field should be an array of strings. Limit the keywords to the most relevant 5 per product.
 
