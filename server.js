@@ -443,9 +443,14 @@ app.get('/get-facebook-photos', async (req, res) => {
   console.log(`🔍 Fetching Facebook photos ....`);
 
   const page1 = 'https://www.facebook.com/vivafresh.rks';
-  const page2 = 'https://www.facebook.com/etcks'  ;
-  const page3 =   'https://www.facebook.com/SPARinKosova' ;
-  const page4 = 'https://www.facebook.com/profile.php?id=100040544017359'; // Example page URL
+ // const page2 = 'https://www.facebook.com/etcks'  ;
+  //const page3 = 'https://www.facebook.com/SPARinKosova' ;
+  //const page4 = 'https://www.facebook.com/profile.php?id=100040544017359'; // Example page URL
+  //const page5 = 'https://www.facebook.com/superviva.ks'
+  //const page6 = 'https://www.facebook.com/Horecacenter.ks';
+  //const page7 = 'https://www.facebook.com/maxisupermarketprishtine';
+  //const page8 = 'https://www.facebook.com/emonacenter';
+
 
 
   
@@ -456,9 +461,7 @@ app.get('/get-facebook-photos', async (req, res) => {
     const input = {
       startUrls: [
         { url: `${page1}/photos` },
-        { url: `${page2}/photos` },
-        { url: `${page3}/photos` },
-        { url: `${page4}/photos` },
+
       ],
       resultsLimit: 10,
       proxy: {
@@ -608,6 +611,87 @@ const SECRET_KEY = 'AAAA-BBBB-CCCC-DDDD-EEEE'; // Consider moving this to enviro
 
 const upload = multer({ dest: 'uploads/' }); // Define upload middleware
 
+
+// add api endpoint like /extract-text that calls extractSaleEndDateFromImage and returns the sale end date
+
+app.post('/extract-sale-end-date', async (req, res) => {
+
+  const { photos} = req.body;
+
+  const imageUrls = photos;
+
+
+  console.log('🔍 Extracting sale end date from image URL:', photos);
+
+
+try {
+    const results = [];
+    for (const imageUrl of imageUrls) {
+      let sale_end_date = null;
+      try {
+        sale_end_date = await extractSaleEndDateFromImage(imageUrl);
+      } catch (err) {
+        console.error('❌ Error extracting date for image:', imageUrl, err);
+      }
+      results.push({ image: imageUrl, sale_end_date: sale_end_date || null });
+    }
+    return res.json(results);
+  } catch (err) {
+    console.error('❌ Error in /extract-sale-end-date route:', err);
+    return res.status(500).json({
+      message: 'Failed to extract sale end date from images.',
+      error: err.message
+    });
+  }
+
+
+
+
+});
+
+
+app.post('/extract-text-single', async (req, res) => {
+
+  console.log('🔍 Extracting data from image using Gemini 1.5 Pro…');
+
+  // Assuming userId is available from authentication middleware or session
+  // Replace with your actual way of getting userId
+  const userId = req.user ? req.user.userId : 1; // Example: Get from req.user if using auth middleware, default to 1
+
+  const { imageUrl, saleEndDate, storeId, flyerBookId } = req.body;
+  console.log('Sale End Date:', saleEndDate);
+  console.log('Store ID:', storeId);
+  console.log('User ID:', userId); // Log userId
+  console.log('Image file:', imageUrl);
+  console.log('flyerBookId:', flyerBookId);
+
+  try {
+
+
+
+
+    // 2️⃣ Format and Extract data using Gemini 1.5 Pro directly from the image URL
+    console.log('▶️  Formatting and extracting data from image using Gemini 1.5 Pro…');
+    // Pass the image URL directly to formatDataToJson
+    const jsonText = await formatDataToJson(imageUrl, imageUrl, saleEndDate, storeId, userId, flyerBookId); // Pass imageUrl as data source and metadata
+    console.log('✅ Formatted JSON from Gemini:', jsonText);
+
+    // 4️⃣ Respond
+    // Respond with the formatted JSON data
+    return res.json({ jsonText, imageUrl });
+
+  } catch (err) {
+    console.error('❌ Error in /extract-text route:', err);
+    // Ensure temp file is deleted even on error
+    if (req.file && req.file.path) {
+        fs.unlinkSync(req.file.path);
+    }
+    return res.status(500).json({
+      message: 'Failed to extract data from image using Gemini.',
+      error: err.message
+    });
+  }
+});
 
 // **UPDATED** /extract-text route to use Gemini 1.5 Pro directly on the image
 app.post('/extract-text', upload.single('image'), async (req, res) => {
@@ -1048,8 +1132,247 @@ async function insertProducts1(jsonData) {
 };
 
 
+// write e function that takes image url and extracts sales end date from the image using Gemini 1.5 Pro 
+// like in functon formatDataToJson but only for sale end date
+
+// change the function to ba an api endpoint that takes image url and returns the sale end date in YYYY-MM-DD format
+
+
+
+
+async function extractSaleEndDateFromImage(imageUrl) {
+  console.log('🔍 Extracting sale end date from image using Gemini 1.5 Pro...')
+  const geminiPrompt = `You are an AI assistant that specializes in extracting sale end dates from images of retail flyers.
+  The flyer is in Albanian language and the sale end date is usually written in a specific Europen format.
+Your task is to analyze the image, identify the sale end date, and return it in the format YYYY-MM-DD.  
+
+Look for text patterns that indicate a date, such as "Sale ends on", "Valid until", or similar phrases.
+Return the date in the format YYYY-MM-DD. If no date is found, return "No date found".`;
+  console.log('Image URL:', imageUrl);
+
+  const response = await generativeModel.generateContent({
+    prompt: geminiPrompt,
+    input: {
+      image: {
+        image_url: imageUrl, // Use the image URL directly
+      },
+    },
+    response_format: {
+      type: 'json',
+      schema: {
+        type: 'object',
+        properties: {
+          saleEndDate: {
+            type: 'string',
+            description: 'The extracted sale end date in YYYY-MM-DD format',
+          },
+        },
+      },
+
+    },
+  });
+  console.log('Response from Gemini:', response);
+  const saleEndDate = response.candidates[0].content.saleEndDate;
+  console.log('Extracted Sale End Date:', saleEndDate);
+  return saleEndDate || 'No date found';
+}
+
+
+
 // **UPDATED** formatDataToJson function to work with image URL
 async function formatDataToJson(imageUrl, originalImageUrl, saleEndDate, storeId, userId, flyerBookId) { // Accepts imageUrl as data source
+  console.log('🔍 Formatting data into JSON using Gemini 1.5 Pro from image URL...');
+  console.log('Metadata received: Image URL:', originalImageUrl, 'Sale End Date:', saleEndDate, 'Store ID:', storeId, 'User ID:', userId , 'flyerBookId:', flyerBookId);
+
+  const geminiPrompt = `You are an AI assistant that specializes in extracting structured product sale information from an image of an Albanian 
+  retail flyer.
+
+Your task is to analyze the image, identify distinct product entries, and extract the product description, original price (if present), 
+sale price, and discount percentage for each. A product entry typically consists of a product description and one or two prices. Original prices are usually higher and may be positioned near the sale price.
+
+Analyze the visual layout and text content within the image to determine which elements belong to which product. 
+Look for price patterns (numbers with currency symbols), percentage signs, and descriptive text.
+
+
+Bellow is a caregories array with category ids, descriptions and weights. Based on the description of the product, 
+you will assign a category_id to each product that best matches the description of the product
+to the categoryDescription in may belong in the array given.
+
+[
+  {"categoryId": 100, "categoryDescription": "Fruits (Fruta)", "categoryWeight": 80},
+  {"categoryId": 101, "categoryDescription": "Vegetables (Perime)", "categoryWeight": 80},
+  {"categoryId": 102, "categoryDescription": "Herbs (Erëza të Freskëta)", "categoryWeight": 80},
+  {"categoryId": 103, "categoryDescription": "Red Meat (Mish i Kuq)", "categoryWeight": 62},
+  {"categoryId": 104, "categoryDescription": "Poultry (Shpendë)", "categoryWeight": 62},
+  {"categoryId": 105, "categoryDescription": "Processed Meats (Mishra të Përpunuar)", "categoryWeight": 59},
+  {"categoryId": 106, "categoryDescription": "Fresh Fish (Peshk i Freskët)", "categoryWeight": 38},
+  {"categoryId": 107, "categoryDescription": "Frozen Fish & Seafood (Peshk dhe Fruta Deti të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 108, "categoryDescription": "Canned Fish (Peshk i Konservuar)", "categoryWeight": 65},
+  {"categoryId": 109, "categoryDescription": "Milk (Qumësht)", "categoryWeight": 82},
+  {"categoryId": 110, "categoryDescription": "Yogurt (Kos / Jogurt)", "categoryWeight": 82},
+  {"categoryId": 111, "categoryDescription": "Cheese (Djathë)", "categoryWeight": 82},
+  {"categoryId": 112, "categoryDescription": "Cream (Ajkë / Krem Qumështi)", "categoryWeight": 82},
+  {"categoryId": 113, "categoryDescription": "Butter (Gjalpë)", "categoryWeight": 82},
+  {"categoryId": 114, "categoryDescription": "Margarine & Spreads (Margarinë dhe Produkte për Lyerje)", "categoryWeight": 64},
+  {"categoryId": 115, "categoryDescription": "Eggs (Vezë)", "categoryWeight": 82},
+  {"categoryId": 116, "categoryDescription": "Bread (Bukë)", "categoryWeight": 71},
+  {"categoryId": 117, "categoryDescription": "Pastries & Croissants (Pasta dhe Kroasante)", "categoryWeight": 71},
+  {"categoryId": 118, "categoryDescription": "Cakes & Sweet Baked Goods (Kekë dhe Ëmbëlsira Furre)", "categoryWeight": 71},
+  {"categoryId": 119, "categoryDescription": "Flour (Miell)", "categoryWeight": 47},
+  {"categoryId": 120, "categoryDescription": "Rice (Oriz)", "categoryWeight": 65},
+  {"categoryId": 121, "categoryDescription": "Pasta & Noodles (Makarona dhe Fide)", "categoryWeight": 65},
+  {"categoryId": 122, "categoryDescription": "Grains & Cereals (Drithëra)", "categoryWeight": 66},
+  {"categoryId": 123, "categoryDescription": "Sugar & Sweeteners (Sheqer dhe Ëmbëltues)", "categoryWeight": 47},
+  {"categoryId": 124, "categoryDescription": "Salt & Spices (Kripë dhe Erëza)", "categoryWeight": 47},
+  {"categoryId": 125, "categoryDescription": "Cooking Oils (Vajra Gatimi)", "categoryWeight": 64},
+  {"categoryId": 126, "categoryDescription": "Vinegar (Uthull)", "categoryWeight": 64},
+  {"categoryId": 127, "categoryDescription": "Canned Goods (Konserva)", "categoryWeight": 65},
+  {"categoryId": 128, "categoryDescription": "Sauces & Condiments (Salca dhe Kondimente)", "categoryWeight": 64},
+  {"categoryId": 129, "categoryDescription": "Spreads (Produkte për Lyerje)", "categoryWeight": 64},
+  {"categoryId": 130, "categoryDescription": "Chips & Crisps (Çipsa dhe Patatina)", "categoryWeight": 76},
+  {"categoryId": 131, "categoryDescription": "Pretzels & Salty Snacks (Shkopinj të Kripur dhe Rosto të Tjera)", "categoryWeight": 76},
+  {"categoryId": 132, "categoryDescription": "Nuts & Seeds (Fruta të Thata dhe Fara)", "categoryWeight": 76},
+  {"categoryId": 133, "categoryDescription": "Chocolate (Çokollatë)", "categoryWeight": 43},
+  {"categoryId": 134, "categoryDescription": "Biscuits & Cookies (Biskota dhe Keksa)", "categoryWeight": 76},
+  {"categoryId": 135, "categoryDescription": "Candies & Gums (Karamele dhe Çamçakëz)", "categoryWeight": 43},
+  {"categoryId": 136, "categoryDescription": "Frozen Vegetables & Fruits (Perime dhe Fruta të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 137, "categoryDescription": "Frozen Potato Products (Produkte Patatesh të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 138, "categoryDescription": "Frozen Ready Meals & Pizza (Gatime të Gata dhe Pica të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 139, "categoryDescription": "Frozen Meat & Fish (Mish dhe Peshk i Ngrirë)", "categoryWeight": 70},
+  {"categoryId": 140, "categoryDescription": "Ice Cream (Akullore)", "categoryWeight": 70},
+  {"categoryId": 141, "categoryDescription": "Baby Food (Ushqim për Foshnje)", "categoryWeight": 7},
+  {"categoryId": 142, "categoryDescription": "Baby Formula (Qumësht Formule)", "categoryWeight": 7},
+  {"categoryId": 143, "categoryDescription": "Water (Ujë)", "categoryWeight": 53},
+  {"categoryId": 144, "categoryDescription": "Still Water (Ujë Natyral / pa Gaz)", "categoryWeight": 53},
+  {"categoryId": 145, "categoryDescription": "Sparkling Water (Ujë Mineral / me Gaz)", "categoryWeight": 53},
+  {"categoryId": 146, "categoryDescription": "Flavored Water (Ujë me Shije)", "categoryWeight": 53},
+  {"categoryId": 147, "categoryDescription": "Fruit Juices (Lëngje Frutash)", "categoryWeight": 53},
+  {"categoryId": 148, "categoryDescription": "Nectars (Nektare)", "categoryWeight": 53},
+  {"categoryId": 149, "categoryDescription": "Smoothies (Smoothie)", "categoryWeight": 53},
+  {"categoryId": 150, "categoryDescription": "Colas (Kola)", "categoryWeight": 53},
+  {"categoryId": 151, "categoryDescription": "Other Carbonated Drinks (Pije të Tjera të Gazuara)", "categoryWeight": 53},
+  {"categoryId": 152, "categoryDescription": "Coffee (Kafe)", "categoryWeight": 53},
+  {"categoryId": 153, "categoryDescription": "Tea (Çaj)", "categoryWeight": 53},
+  {"categoryId": 154, "categoryDescription": "Energy Drinks (Pije Energjetike)", "categoryWeight": 53},
+  {"categoryId": 155, "categoryDescription": "Alcoholic Beverages (Pije Alkoolike)", "categoryWeight": 29},
+  {"categoryId": 156, "categoryDescription": "Beer (Birrë)", "categoryWeight": 29},
+  {"categoryId": 157, "categoryDescription": "Wine (Verë)", "categoryWeight": 29},
+  {"categoryId": 158, "categoryDescription": "Spirits (Pije Spirtuore)", "categoryWeight": 29},
+  {"categoryId": 159, "categoryDescription": "Laundry Detergents (Detergjentë Rrobash)", "categoryWeight": 59},
+  {"categoryId": 160, "categoryDescription": "Fabric Softeners (Zbutës Rrobash)", "categoryWeight": 59},
+  {"categoryId": 161, "categoryDescription": "Dishwashing Products (Produkte për Larjen e Enëve)", "categoryWeight": 59},
+  {"categoryId": 162, "categoryDescription": "Surface Cleaners (Pastrues Sipërfaqesh)", "categoryWeight": 59},
+  {"categoryId": 163, "categoryDescription": "Toilet Cleaners (Pastrues WC)", "categoryWeight": 59},
+  {"categoryId": 164, "categoryDescription": "Garbage Bags (Thasë Mbeturinash)", "categoryWeight": 59},
+  {"categoryId": 165, "categoryDescription": "Soaps & Shower Gels (Sapunë dhe Xhel Dushi)", "categoryWeight": 50},
+  {"categoryId": 166, "categoryDescription": "Shampoos & Conditioners (Shampon dhe Balsam Flokësh)", "categoryWeight": 50},
+  {"categoryId": 167, "categoryDescription": "Oral Care (Kujdesi Oral)", "categoryWeight": 50},
+  {"categoryId": 168, "categoryDescription": "Deodorants & Antiperspirants (Deodorantë)", "categoryWeight": 50},
+  {"categoryId": 169, "categoryDescription": "Skin Care (Kujdesi i Lëkurës)", "categoryWeight": 50},
+  {"categoryId": 170, "categoryDescription": "Feminine Hygiene (Higjiena Femërore)", "categoryWeight": 50},
+  {"categoryId": 171, "categoryDescription": "Paper Products (Produkte Letre)", "categoryWeight": 59},
+  {"categoryId": 172, "categoryDescription": "Baby Diapers & Wipes (Pelena dhe Letra të Lagura për Foshnje)", "categoryWeight": 7},
+  {"categoryId": 173, "categoryDescription": "Other", "categoryWeight": 1}
+]
+
+
+
+For each distinct product entry you identify in the image, create a JSON object in your output array with these exact keys and data types:
+
+* \`product_description\` (string): The complete descriptive text associated with the product in the flyer. Include any size/volume information (e.g., 0,33L, 400ml, 3kg) if it's part of the product's description text in the flyer.
+* \`old_price\` (string or null): The text of the original price (if a higher price is present). Remove currency symbols (€). If no distinct original price is found for a product, use \`null\`.
+* \`new_price\` (string or null): The text of the current sale price (the lower price). Remove currency symbols (€). If no sale price is found, use \`null\`.
+* \`discount_percentage\` (string or null): The numerical value of the discount percentage shown (e.g., "14"). Remove the percentage symbol (%). If no discount percentage is found, use \`null\`.
+* \`sale_end_date\` (string): Use the provided value: "${saleEndDate}". Format as "YYYY-MM-DD".
+* \`storeId\` (number): Use the provided value: ${storeId}.
+* \`userId\` (number): Use the provided value: ${userId}.
+* \`image_url\` (string): Use the provided value: "${originalImageUrl}".
+* \`category_id\` (number or null): The numerical value of the categoryId extract from categories array.\`.
+*\`flyer_book_id\` (number or null): Use the provided value: "${flyerBookId}".\`.
+
+Also, generate a list of relevant keywords for each product description. These keywords should be in lowercase, in Albanian, 
+and exclude common articles, conjunctions, prepositions, and size/volume information (like 'kg', 'l', 'pako', numbers, units). 
+Only include words longer than 2 characters. Convert the Albanian letter 'ë' to 'e' for all keywords. 
+If there is a keyword like "qumesht" or "qumësht" add a keyword "qumsht" as well to cover both spellings.
+if there is a keyword like "veze" add a keyword "vo" as well to cover both spellings.
+if there is a keyword like "shalqi*" add a keyword "bostan" as well to cover both spellings.
+if there is a keyword like "ver*" add a keyword "vene" as well to cover both spellings.
+if there is a keyword like "qepe" add a keyword "kep" as well to cover both spellings.
+The \`keywords\` field should be an array of strings. Limit the keywords to the most relevant 5 per product.
+
+If you can find a date mentioned explicitly in the flyer image that seems to indicate the sale end date, use that date instead of the provided \`${saleEndDate}\`, formatted as "YYYY-MM-DD". If multiple dates are present, use the latest one as the \`sale_end_date\` for all products extracted from this image.
+
+Provide ONLY the JSON array of extracted product objects in your response. Do not include any introductory or concluding text, explanations, or code block markers. Ensure the output is valid JSON.
+
+`;
+
+
+
+
+/*
+
+
+*/
+
+
+
+  try {
+    // Correctly structure the content for generateContent
+    const response = await generativeModel.generateContent({
+      contents: [
+        {
+          role: 'user', // Added the user role
+          parts: [
+            { text: geminiPrompt }, // Text part
+            {
+              fileData: {
+                mimeType: 'image/jpeg', // Or image/png, etc. based on your uploaded file type
+                fileUri: imageUrl, // Pass the Cloudinary URL here
+              },
+            }, // File data part
+          ],
+        },
+      ],
+    });
+
+
+    let text = response.response.candidates[0].content.parts[0].text;
+
+    console.log('Raw Gemini Output:', text);
+
+    // Clean up potential markdown code block and backticks
+    text = text.replace(/^```json\s*/, '').replace(/\s*```$/, '').replace(/`/g, '');
+
+    try {
+        const products = JSON5.parse(text);
+        console.log('Parsed JSON:', products);
+
+        // Call the insertion function with the parsed products array
+        await insertProducts1(products);
+
+        return products; // Return the formatted JSON data
+
+    } catch (parseError) {
+        console.error('JSON Parsing Error:', parseError);
+        console.error('Failed JSON Text:', text);
+        return null;
+    }
+
+  } catch (error) {
+      console.error('Gemini API Error:', error);
+      // Check for specific error details if available
+      if (error.details) {
+          console.error('Gemini API Error Details:', error.details);
+      }
+      if (error.message && error.message.includes("400 Bad Request")) {
+           console.error("Possible issue: Incorrect file type or URL for Gemini Vision input.");
+      }
+      return null;
+  }
+}
+
+
+async function extractDateFromData(imageUrl, originalImageUrl, saleEndDate, storeId, userId, flyerBookId) { // Accepts imageUrl as data source
   console.log('🔍 Formatting data into JSON using Gemini 1.5 Pro from image URL...');
   console.log('Metadata received: Image URL:', originalImageUrl, 'Sale End Date:', saleEndDate, 'Store ID:', storeId, 'User ID:', userId , 'flyerBookId:', flyerBookId);
 
