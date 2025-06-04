@@ -360,8 +360,6 @@ app.use(identifyUserMiddleware);
 
 
 import authRoutes from "./routes/authRoutes.js";
-import { start } from 'repl';
-import { redirectDocument } from 'react-router-dom';
 app.use("/auth", authRoutes);
 
 
