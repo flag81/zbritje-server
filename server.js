@@ -4,11 +4,15 @@ import cors from 'cors';
 import fs from 'fs';
 import dotenv from 'dotenv';
 
+
+
+
 // We no longer need groupTextElementsSpatially if extracting directly from image
 // import { groupTextElementsSpatially } from './utils.js';
 
 import identifyUserMiddleware from './identifyUserMiddleware.js'
 import  {queryPromise}  from './dbUtils.js';
+import { uploadFacebookPhotoToCloudinary } from './uploadFacebookPhoto.js';
 
 
 
@@ -356,6 +360,7 @@ app.use(identifyUserMiddleware);
 
 
 import authRoutes from "./routes/authRoutes.js";
+import { start } from 'repl';
 app.use("/auth", authRoutes);
 
 
@@ -442,27 +447,55 @@ app.get('/get-facebook-photos', async (req, res) => {
 
   console.log(`🔍 Fetching Facebook photos ....`);
 
-  const page1 = 'https://www.facebook.com/vivafresh.rks';
- // const page2 = 'https://www.facebook.com/etcks'  ;
-  //const page3 = 'https://www.facebook.com/SPARinKosova' ;
-  //const page4 = 'https://www.facebook.com/profile.php?id=100040544017359'; // Example page URL
+  const page1 = 'https://www.facebook.com/vivafresh.rks/photos';
+  const page5 = 'https://www.facebook.com/etcks/photos'; // Example page URL;
+  const page3 = 'https://www.facebook.com/SPARinKosova/photos' ;
+  const page4 = 'https://www.facebook.com/RrjetiMeridianExpress/photos'; // Example page URL
   //const page5 = 'https://www.facebook.com/superviva.ks'
   //const page6 = 'https://www.facebook.com/Horecacenter.ks';
-  //const page7 = 'https://www.facebook.com/maxisupermarketprishtine';
+  const page2 = 'https://www.facebook.com/maxisupermarketprishtine/photos';
   //const page8 = 'https://www.facebook.com/emonacenter';
 
 
+  const urls = [
+    {url: page1, storeId: 1, name: 'Viva Fresh'},
+    {url: page2, storeId: 2, name: 'Maxi Supermarket'},
+    {url: page3, storeId: 3, name: 'Spar Kosova'},
+    {url: page4, storeId: 4, name: 'Spar Kosova'},
+    {url: page5, storeId: 5, name: 'Spar Kosova'},
+    {url: 'https://www.facebook.com/kamkosova/photos', storeId: 6, name: 'Kam Kosova'},
+    {url: 'https://www.facebook.com/InterexKs/photos', storeId: 7, name: 'interex'},
+
+
+  ]
 
   
 
+// filter urls to return only the object with matching given mystoreId with storeId in urls array
+
+   const mystoreId = parseInt(req.query.storeId, 10); // Assuming storeId is passed as a query parameter
+
+
+   //const filteredUrls = urls.filter(urlObj => urlObj.storeId === mystoreId).map(urlObj => urlObj.url);
+
+   //filter objects in urls array to return only the url and storeId of the object with matching mystoreId
+    const filteredUrls = urls.filter(urlObj => urlObj.storeId === mystoreId).map(urlObj => ({url: urlObj.url, storeId: urlObj.storeId}));
+
+
+   console.log(`🔍 Filtered URLs for storeId ${mystoreId}:`, filteredUrls);
+
+
+
+  if(filteredUrls.length === 0) {
+    console.error(`❌ No URLs found for storeId ${mystoreId}`);
+    return res.status(404).json({ error: `No URLs found for storeId ${mystoreId}` });
+  }
+  
 
 
   try {
     const input = {
-      startUrls: [
-        { url: `${page1}/photos` },
-
-      ],
+      startUrls: filteredUrls ,
       resultsLimit: 10,
       proxy: {
         useApifyProxy: true,
@@ -478,7 +511,7 @@ app.get('/get-facebook-photos', async (req, res) => {
 
 
     console.log(`📸 Fetched ${items.length} items from Facebook.`);
-    console.log(`📸 Items:`, items);
+    //console.log(`📸 Items:`, items);
 
 
 
@@ -665,36 +698,44 @@ app.post('/extract-text-single', async (req, res) => {
   console.log('Image file:', imageUrl);
   console.log('flyerBookId:', flyerBookId);
 
+
+
   try {
+    const cloudinaryUrl = await uploadFacebookPhotoToCloudinary(imageUrl);
 
+    console.log('✅ Uploaded URL cloudinaryc:', cloudinaryUrl);
 
+    if( !cloudinaryUrl ) {
 
+      console.error('❌ Failed to upload image to Cloudinary');
+      return res.status(500).json({ error: 'Failed to upload image to Cloudinary' });
 
-    // 2️⃣ Format and Extract data using Gemini 1.5 Pro directly from the image URL
-    console.log('▶️  Formatting and extracting data from image using Gemini 1.5 Pro…');
-    // Pass the image URL directly to formatDataToJson
-    const jsonText = await formatDataToJson(imageUrl, imageUrl, saleEndDate, storeId, userId, flyerBookId); // Pass imageUrl as data source and metadata
-    console.log('✅ Formatted JSON from Gemini:', jsonText);
-
-    // 4️⃣ Respond
-    // Respond with the formatted JSON data
-    return res.json({ jsonText, imageUrl });
-
-  } catch (err) {
-    console.error('❌ Error in /extract-text route:', err);
-    // Ensure temp file is deleted even on error
-    if (req.file && req.file.path) {
-        fs.unlinkSync(req.file.path);
     }
-    return res.status(500).json({
-      message: 'Failed to extract data from image using Gemini.',
-      error: err.message
-    });
+
+    try{
+
+      const jsonText = await formatDataToJson(cloudinaryUrl, cloudinaryUrl, saleEndDate, storeId, userId, flyerBookId); // Pass imageUrl as data source and metadata
+      console.log('✅ Formatted JSON from Gemini:', jsonText);
+
+    }
+    catch (err) {
+      console.error('❌ Error formatting data to JSON:', err);
+      return res.status(500).json({ error: 'Failed to format data', details: err.message });
+    }
+
+
+
+
+    res.json({ cloudinaryUrl });
+  } catch (err) {
+    res.status(500).json({ error: 'Upload failed', details: err.message });
   }
+
+
 });
 
 // **UPDATED** /extract-text route to use Gemini 1.5 Pro directly on the image
-app.post('/extract-text', upload.single('image'), async (req, res) => {
+app.post('/extract-text', async (req, res) => {
   console.log('🔍 Extracting data from image using Gemini 1.5 Pro…');
 
   // Assuming userId is available from authentication middleware or session
@@ -717,26 +758,8 @@ app.post('/extract-text', upload.single('image'), async (req, res) => {
     const imagePath = req.file.path;
     console.log(`🛣️  Local path: ${imagePath}`);
 
-    // 1️⃣ Upload to Cloudinary to get a public URL
-    // console.log('▶️  Uploading to Cloudinary…');
-    // const uploadedImage = await cloudinary.uploader.upload(imagePath, {
-    //   folder: 'uploads',
-    //   public_id: req.file.originalname.split('.')[0],
-    //   resource_type: 'image',
-    //   overwrite: true,
-    //   unique_filename: false,
-    //   format: 'webp',           // ← converts to WebP
-    //   dpr: 'auto',            // ← sets device pixel ratio
-    //   // how to highest quality
 
-
-    //   quality: 'auto:best',     // ← sets quality
-
-
-
-    // });
-
-        const autoTransformation = 'f_auto,q_auto,dpr_auto';
+    const autoTransformation = 'f_auto,q_auto,dpr_auto';
 
     const uploadedImage = await cloudinary.uploader.upload(imagePath, {
       folder: 'uploads',
@@ -1305,6 +1328,7 @@ If you can find a date mentioned explicitly in the flyer image that seems to ind
 Provide ONLY the JSON array of extracted product objects in your response. Do not include any introductory or concluding text, explanations, or code block markers. Ensure the output is valid JSON.
 
 `;
+
 
 
 
