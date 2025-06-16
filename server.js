@@ -7,12 +7,15 @@ import dotenv from 'dotenv';
 
 
 
+
 // We no longer need groupTextElementsSpatially if extracting directly from image
 // import { groupTextElementsSpatially } from './utils.js';
 
 import identifyUserMiddleware from './identifyUserMiddleware.js'
 import  {queryPromise}  from './dbUtils.js';
 import { uploadFacebookPhotoToCloudinary } from './uploadFacebookPhoto.js';
+
+import { fetchFacebookPhotos } from './rapidApi.js';
 
 
 
@@ -88,8 +91,7 @@ import bodyParser from'body-parser';
 
 import AppleSigninAuth from 'apple-signin-auth';
 
-import OpenAI from "openai";
-const openai = new OpenAI(); // Keeping OpenAI client as it's used in chatgptExtractProducts route
+
 
 import download from 'image-downloader';
 
@@ -383,6 +385,28 @@ app.post('/dashboardLogin', (req, res) => {
 });
 
 
+app.get('/facebook-photos', async (req, res) => {
+  const pageId = req.query.facebookPageId;
+
+  console.log(`🔍 Fetching Facebook photos for page ID: ${pageId}`);
+
+  if (!pageId) {
+    return res.status(400).json({ error: 'Missing page_id query parameter' });
+  }
+
+  const data = await fetchFacebookPhotos(pageId);
+
+  // Extract photo objects as array from the results object
+  const photoArray = Object.values(data.results || {});
+
+  console.log(`📸 Fetched ${photoArray.length} photos for page ID: ${pageId}`);
+
+  // Return in the format expected by Dashboard.jsx
+  res.json({ items: photoArray });
+  
+});
+
+
 app.get('/get-facebook-posts', async (req, res) => {
 
 
@@ -652,9 +676,6 @@ try {
     });
   }
 
-
-
-
 });
 
 
@@ -710,20 +731,94 @@ app.post('/extract-text-single', async (req, res) => {
 
 });
 
-// **UPDATED** /extract-text route to use Gemini 1.5 Pro directly on the image
-app.post('/extract-text', async (req, res) => {
-  console.log('🔍 Extracting data from image using Gemini 1.5 Pro…');
+app.post('/extract-text', upload.single('image'), async (req, res) => {
+  console.log('🔍 Extracting data from image using Gemini 1.5 Pro…extract-text');
 
   // Assuming userId is available from authentication middleware or session
   // Replace with your actual way of getting userId
   const userId = req.user ? req.user.userId : 1; // Example: Get from req.user if using auth middleware, default to 1
 
-  const { saleEndDate, storeId, flyerBookId } = req.body;
+  const { imageUrl, saleEndDate, storeId, flyerBookId , facebookUrl } = req.body;
   console.log('Sale End Date:', saleEndDate);
   console.log('Store ID:', storeId);
   console.log('User ID:', userId); // Log userId
-  console.log('Image file:', req.file);
+  console.log('Image file:', req.file ? req.file.originalname : 'No file uploaded');
   console.log('flyerBookId:', flyerBookId);
+  console.log('Facebook URL:', facebookUrl); // Log Facebook URL if provided
+
+  try {
+    if (!req.file) {
+      console.error('❌ No image file provided.');
+      return res.status(400).json({ message: 'No image file provided.' });
+    }
+
+    const imagePath = req.file.path;
+    console.log(`🛣️  Local path: ${imagePath}`);
+
+    const autoTransformation = 'f_auto,q_auto,dpr_auto';
+
+    const uploadedImage = await cloudinary.uploader.upload(imagePath, {
+      folder: 'uploads',
+      public_id: req.file.originalname.split('.')[0],
+      resource_type: 'image',
+      overwrite: true,
+      unique_filename: false,
+      transformation: [
+        {
+          fetch_format: 'auto',  // f_auto
+          quality:      'auto',  // q_auto
+          dpr:          'auto'   // dpr_auto
+        }
+      ]
+    });
+
+    const imageUrl = uploadedImage.secure_url;
+    console.log('✅ Uploaded URL:', imageUrl);
+
+    // 2️⃣ Format and Extract data using Gemini 1.5 Pro directly from the image URL
+    console.log('▶️  Formatting and extracting data from image using Gemini 1.5 Pro…');
+    // Pass the image URL directly to formatDataToJson
+    const jsonText = await formatDataToJson(imageUrl, imageUrl, saleEndDate, storeId, userId, flyerBookId); // Pass imageUrl as data source and metadata
+    console.log('✅ Formatted JSON from Gemini:', jsonText);
+
+    // 3️⃣ Cleanup
+    fs.unlinkSync(imagePath);
+    console.log('✅ Deleted temp file');
+
+    // 4️⃣ Respond
+    // Respond with the formatted JSON data
+    return res.json({ jsonText, imageUrl });
+
+  } catch (err) {
+    console.error('❌ Error in /extract-text route:', err);
+    // Ensure temp file is deleted even on error
+    if (req.file && req.file.path) {
+        fs.unlinkSync(req.file.path);
+    }
+    return res.status(500).json({
+      message: 'Failed to extract data from image using Gemini.',
+      error: err.message
+    });
+  }
+});
+
+
+// **UPDATED** /extract-text route to use Gemini 1.5 Pro directly on the image
+app.post('/extract-text000',upload.single('image'), async (req, res) => {
+  console.log('🔍 Extracting data from image using Gemini 1.5 Pro…extract-text');
+
+  // Assuming userId is available from authentication middleware or session
+  // Replace with your actual way of getting userId
+  const userId = req.user ? req.user.userId : 1; // Example: Get from req.user if using auth middleware, default to 1
+
+
+  const { imageUrl, saleEndDate, storeId, flyerBookId , facebookUrl } = req.body;
+  console.log('Sale End Date:', saleEndDate);
+  console.log('Store ID:', storeId);
+  console.log('User ID:', userId); // Log userId
+  console.log('Image file:', req.file ? req.file.originalname : 'No file uploaded');
+  console.log('flyerBookId:', flyerBookId);
+  console.log('Facebook URL:', facebookUrl); // Log Facebook URL if provided
 
   try {
     if (!req.file) {
@@ -2129,70 +2224,7 @@ app.delete('/delete-image', async (req, res) => {
   });
 
 
-app.get('/chatgptExtractProducts', async (req, res) => {
-  const { storeId, imageUrl } = req.query;
-  const imageBaseUrl = "https://res.cloudinary.com/dt7a4yl1x/image/upload/";
-  const imageName = imageUrl.split('/').pop();
-  console.log('storeId:', storeId);
-  console.log('imageUrl:', imageUrl);
-  console.log('imageName:', imageName);
 
-  const prompt = `Can you extract product sale information in albanian language from this sales flyer for each product in the image , if available.
-  Convert ë letter to e for all the keywords. Do not include conjunctions, articles words in albanian, in keywords.
-  Do not include size info for keywords and only words with more than 2 characters as keywords.
-  The storeId is:${storeId}.
- populate the "image_url" field with a variable ${imageName} from above".
- If some data is not available, leave the field empty.
-  The response should be in the JSON format,  like the following example:
-  [
-    {
-      "product_description": "Mandarina kg",
-      "old_price": 0.89,
-      "new_price": 0.69,
-      "discount_percentage": 22,
-      "sale_end_date": "2024-12-26",
-      "storeId": 1,
-      "image_url": ${imageName},
-      "keywords": ["mandarina"]
-    },
-    {
-      "product_description": "Kerpudhe pako",
-      "old_price": 1.49,
-      "new_price": 0.99,
-      "discount_percentage": 33,
-      "sale_end_date": "2024-12-26",
-      "storeId": 1,
-      "image_url": ${imageName},
-      "keywords": ["kerpudhe"]
-}]
-
-` ;
-
-  const response = await openai.chat.completions.create({
-    model: "gpt-4-turbo",
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: prompt },
-          {
-            type: "image_url",
-            image_url: {
-              "url": imageUrl,
-            },
-          },
-        ],
-      },
-    ],
-  });
-
-  let resp = response.choices[0];
-  let content = resp.message.content;
-  content = content.replace(/```json\n/, '').replace(/```$/, '');
-  const productList = JSON.parse(content);
-  console.log(productList);
-  res.json(productList);
-});
 
 
 app.post('/upload-multiple', upload.array('images', 10), async (req, res) => {
