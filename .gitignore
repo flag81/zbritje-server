@@ -13,7 +13,12 @@ dist-ssr
 *.local
 *.jpg
 .env
-persistent
+
+# ignore persistent folder
+.persistent
+
+
+
 
 # Editor directories and files
 .vscode/*
