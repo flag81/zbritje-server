@@ -14,8 +14,8 @@ dist-ssr
 *.jpg
 .env
 
-# ignore persistent folder
-.persistent
+# ignore persistent folder and everything in it
+persistent/
 
 
 
