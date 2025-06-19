@@ -403,7 +403,7 @@ app.get('/facebook-photos', async (req, res) => {
 
   // Return in the format expected by Dashboard.jsx
   res.json({ items: photoArray });
-  
+
 });
 
 
@@ -687,13 +687,29 @@ app.post('/extract-text-single', async (req, res) => {
   // Replace with your actual way of getting userId
   const userId = req.user ? req.user.userId : 1; // Example: Get from req.user if using auth middleware, default to 1
 
-  const { imageUrl, saleEndDate, storeId, flyerBookId , facebookUrl } = req.body;
+  const { imageUrl, imageId, saleEndDate, storeId, flyerBookId , facebookUrl } = req.body;
   console.log('Sale End Date:', saleEndDate);
   console.log('Store ID:', storeId);
   console.log('User ID:', userId); // Log userId
   console.log('Image file:', imageUrl);
   console.log('flyerBookId:', flyerBookId);
   console.log('Facebook URL:', facebookUrl); // Log Facebook URL if provided
+  console.log('Image ID:', imageId); // Log Image ID if provided
+
+
+  //check if ythe imageiId provided is in database facebookPhotos table
+  if (!imageId) {
+    console.error('❌ No imageId provided.');
+    return res.status(400).json({ message: 'No imageId provided.' });
+  }
+  const checkQuery = `SELECT * FROM facebookPhotos WHERE facebookId = ?`;
+  const checkValues = [imageId];
+  const checkResult = await queryPromise(checkQuery, checkValues);
+  if (checkResult.length > 0) {
+    console.log(`✅ Image ID ${imageId} already exists in database.`);
+    return res.status(400).json({ message: 'Image ID already exists in database.' });
+  }
+  console.log(`✅ Image ID ${imageId} does not exist in database, proceeding with upload.`);
 
 
 
@@ -719,8 +735,19 @@ app.post('/extract-text-single', async (req, res) => {
       console.error('❌ Error formatting data to JSON:', err);
       return res.status(500).json({ error: 'Failed to format data', details: err.message });
     }
+  /// add functionality to save the image to db tbl facebookPhotos with the id AUTO_INCREMENT and the imageId fields
 
-
+    try {
+      const insertQuery = `INSERT INTO facebookPhotos (facebookId) VALUES (?)`;
+      const values = [imageId];
+      await queryPromise(insertQuery, values);
+      console.log('✅ Image data saved to database with imageId:', imageId);
+    } catch (dbErr) {
+      console.error('❌ Error saving image data to database:', dbErr);
+      // Continue execution even if database save fails
+    }
+    
+    // Respond with the Cloudinary URL
 
 
     res.json({ cloudinaryUrl });
