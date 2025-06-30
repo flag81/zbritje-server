@@ -9,7 +9,7 @@ export async function fetchFacebookPosts(pageId) {
       params: { page_id: pageId },
       headers: {
         'x-rapidapi-host': 'facebook-scraper3.p.rapidapi.com',
-        'x-rapidapi-key': '3e1574e969mshdb7f787e02bd267p14d308jsncb76c7ee6e6c',
+        'x-rapidapi-key': process.env.RAPID_API_KEY, // ✅ FIXED: Use environment variable for API key
       }
     });
 
