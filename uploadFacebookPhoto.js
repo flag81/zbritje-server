@@ -42,3 +42,26 @@ console.log('📸 Uploading Facebook photo to Cloudinary:', imageUrl);
     throw err;
   }
 }
+
+export async function uploadMultipleFacebookPhotosToCloudinary(imageUrls) {
+  if (!Array.isArray(imageUrls)) {
+    throw new Error('imageUrls must be an array');
+  }
+  console.log('📸 Uploading multiple Facebook photos to Cloudinary:', imageUrls);
+
+  const uploadedUrls = [];
+  for (let i = 0; i < imageUrls.length; i++) {
+    const url = imageUrls[i];
+    try {
+      console.log(`➡️ [${i + 1}/${imageUrls.length}] Uploading: ${url}`);
+      const uploadedUrl = await uploadFacebookPhotoToCloudinary(url);
+      uploadedUrls.push(uploadedUrl);
+      console.log(`✅ Uploaded: ${uploadedUrl}`);
+    } catch (err) {
+      console.error(`❌ Failed to upload image at index ${i}: ${url}`, err.message);
+      uploadedUrls.push(null); // Or skip, or handle as needed
+    }
+  }
+  console.log('📦 All uploads complete:', uploadedUrls);
+  return uploadedUrls;
+}
