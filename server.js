@@ -5,9 +5,6 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 
 
-
-
-
 // We no longer need groupTextElementsSpatially if extracting directly from image
 // import { groupTextElementsSpatially } from './utils.js';
 
@@ -766,7 +763,7 @@ console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
   // print potText array
 
 
-  
+
 
   console.log('🔍 [extract-text-single] Post Text Array:', postText);
   console.log('🔍 [extract-text-single] postId:', postId);
