@@ -843,7 +843,7 @@ app.post('/extract-text-single0', async (req, res) => {
   allMessages.push(`✅ Image ID ${imageId} does not exist in database, proceeding with upload.`);
 
 
-
+  
   try {
 
 
@@ -1355,6 +1355,90 @@ Your task is to analyze the image, identify distinct product entries, and extrac
 
 Analyze the visual layout and text content within the image to determine which elements belong to which product. 
 Look for price patterns (numbers with currency symbols), percentage signs, and descriptive text.
+
+
+
+Bellow is a caregories array with category ids, descriptions and weights. Based on the description of the product, 
+you will assign a category_id to each product that best matches the description of the product
+to the categoryDescription in may belong in the array given.
+
+[
+  {"categoryId": 100, "categoryDescription": "Fruits (Fruta)", "categoryWeight": 80},
+  {"categoryId": 101, "categoryDescription": "Vegetables (Perime)", "categoryWeight": 80},
+  {"categoryId": 102, "categoryDescription": "Herbs (Erëza të Freskëta)", "categoryWeight": 80},
+  {"categoryId": 103, "categoryDescription": "Red Meat (Mish i Kuq)", "categoryWeight": 62},
+  {"categoryId": 104, "categoryDescription": "Poultry (Shpendë)", "categoryWeight": 62},
+  {"categoryId": 105, "categoryDescription": "Processed Meats (Mishra të Përpunuar)", "categoryWeight": 59},
+  {"categoryId": 106, "categoryDescription": "Fresh Fish (Peshk i Freskët)", "categoryWeight": 38},
+  {"categoryId": 107, "categoryDescription": "Frozen Fish & Seafood (Peshk dhe Fruta Deti të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 108, "categoryDescription": "Canned Fish (Peshk i Konservuar)", "categoryWeight": 65},
+  {"categoryId": 109, "categoryDescription": "Milk (Qumësht)", "categoryWeight": 82},
+  {"categoryId": 110, "categoryDescription": "Yogurt (Kos / Jogurt)", "categoryWeight": 82},
+  {"categoryId": 111, "categoryDescription": "Cheese (Djathë)", "categoryWeight": 82},
+  {"categoryId": 112, "categoryDescription": "Cream (Ajkë / Krem Qumështi)", "categoryWeight": 82},
+  {"categoryId": 113, "categoryDescription": "Butter (Gjalpë)", "categoryWeight": 82},
+  {"categoryId": 114, "categoryDescription": "Margarine & Spreads (Margarinë dhe Produkte për Lyerje)", "categoryWeight": 64},
+  {"categoryId": 115, "categoryDescription": "Eggs (Vezë)", "categoryWeight": 82},
+  {"categoryId": 116, "categoryDescription": "Bread (Bukë)", "categoryWeight": 71},
+  {"categoryId": 117, "categoryDescription": "Pastries & Croissants (Pasta dhe Kroasante)", "categoryWeight": 71},
+  {"categoryId": 118, "categoryDescription": "Cakes & Sweet Baked Goods (Kekë dhe Ëmbëlsira Furre)", "categoryWeight": 71},
+  {"categoryId": 119, "categoryDescription": "Flour (Miell)", "categoryWeight": 47},
+  {"categoryId": 120, "categoryDescription": "Rice (Oriz)", "categoryWeight": 65},
+  {"categoryId": 121, "categoryDescription": "Pasta & Noodles (Makarona dhe Fide)", "categoryWeight": 65},
+  {"categoryId": 122, "categoryDescription": "Grains & Cereals (Drithëra)", "categoryWeight": 66},
+  {"categoryId": 123, "categoryDescription": "Sugar & Sweeteners (Sheqer dhe Ëmbëltues)", "categoryWeight": 47},
+  {"categoryId": 124, "categoryDescription": "Salt & Spices (Kripë dhe Erëza)", "categoryWeight": 47},
+  {"categoryId": 125, "categoryDescription": "Cooking Oils (Vajra Gatimi)", "categoryWeight": 64},
+  {"categoryId": 126, "categoryDescription": "Vinegar (Uthull)", "categoryWeight": 64},
+  {"categoryId": 127, "categoryDescription": "Canned Goods (Konserva)", "categoryWeight": 65},
+  {"categoryId": 128, "categoryDescription": "Sauces & Condiments (Salca dhe Kondimente)", "categoryWeight": 64},
+  {"categoryId": 129, "categoryDescription": "Spreads (Produkte për Lyerje)", "categoryWeight": 64},
+  {"categoryId": 130, "categoryDescription": "Chips & Crisps (Çipsa dhe Patatina)", "categoryWeight": 76},
+  {"categoryId": 131, "categoryDescription": "Pretzels & Salty Snacks (Shkopinj të Kripur dhe Rosto të Tjera)", "categoryWeight": 76},
+  {"categoryId": 132, "categoryDescription": "Nuts & Seeds (Fruta të Thata dhe Fara)", "categoryWeight": 76},
+  {"categoryId": 133, "categoryDescription": "Chocolate (Çokollatë)", "categoryWeight": 43},
+  {"categoryId": 134, "categoryDescription": "Biscuits & Cookies (Biskota dhe Keksa)", "categoryWeight": 76},
+  {"categoryId": 135, "categoryDescription": "Candies & Gums (Karamele dhe Çamçakëz)", "categoryWeight": 43},
+  {"categoryId": 136, "categoryDescription": "Frozen Vegetables & Fruits (Perime dhe Fruta të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 137, "categoryDescription": "Frozen Potato Products (Produkte Patatesh të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 138, "categoryDescription": "Frozen Ready Meals & Pizza (Gatime të Gata dhe Pica të Ngrira)", "categoryWeight": 70},
+  {"categoryId": 139, "categoryDescription": "Frozen Meat & Fish (Mish dhe Peshk i Ngrirë)", "categoryWeight": 70},
+  {"categoryId": 140, "categoryDescription": "Ice Cream (Akullore)", "categoryWeight": 70},
+  {"categoryId": 141, "categoryDescription": "Baby Food (Ushqim për Foshnje)", "categoryWeight": 7},
+  {"categoryId": 142, "categoryDescription": "Baby Formula (Qumësht Formule)", "categoryWeight": 7},
+  {"categoryId": 143, "categoryDescription": "Water (Ujë)", "categoryWeight": 53},
+  {"categoryId": 144, "categoryDescription": "Still Water (Ujë Natyral / pa Gaz)", "categoryWeight": 53},
+  {"categoryId": 145, "categoryDescription": "Sparkling Water (Ujë Mineral / me Gaz)", "categoryWeight": 53},
+  {"categoryId": 146, "categoryDescription": "Flavored Water (Ujë me Shije)", "categoryWeight": 53},
+  {"categoryId": 147, "categoryDescription": "Fruit Juices (Lëngje Frutash)", "categoryWeight": 53},
+  {"categoryId": 148, "categoryDescription": "Nectars (Nektare)", "categoryWeight": 53},
+  {"categoryId": 149, "categoryDescription": "Smoothies (Smoothie)", "categoryWeight": 53},
+  {"categoryId": 150, "categoryDescription": "Colas (Kola)", "categoryWeight": 53},
+  {"categoryId": 151, "categoryDescription": "Other Carbonated Drinks (Pije të Tjera të Gazuara)", "categoryWeight": 53},
+  {"categoryId": 152, "categoryDescription": "Coffee (Kafe)", "categoryWeight": 53},
+  {"categoryId": 153, "categoryDescription": "Tea (Çaj)", "categoryWeight": 53},
+  {"categoryId": 154, "categoryDescription": "Energy Drinks (Pije Energjetike)", "categoryWeight": 53},
+  {"categoryId": 155, "categoryDescription": "Alcoholic Beverages (Pije Alkoolike)", "categoryWeight": 29},
+  {"categoryId": 156, "categoryDescription": "Beer (Birrë)", "categoryWeight": 29},
+  {"categoryId": 157, "categoryDescription": "Wine (Verë)", "categoryWeight": 29},
+  {"categoryId": 158, "categoryDescription": "Spirits (Pije Spirtuore)", "categoryWeight": 29},
+  {"categoryId": 159, "categoryDescription": "Laundry Detergents (Detergjentë Rrobash)", "categoryWeight": 59},
+  {"categoryId": 160, "categoryDescription": "Fabric Softeners (Zbutës Rrobash)", "categoryWeight": 59},
+  {"categoryId": 161, "categoryDescription": "Dishwashing Products (Produkte për Larjen e Enëve)", "categoryWeight": 59},
+  {"categoryId": 162, "categoryDescription": "Surface Cleaners (Pastrues Sipërfaqesh)", "categoryWeight": 59},
+  {"categoryId": 163, "categoryDescription": "Toilet Cleaners (Pastrues WC)", "categoryWeight": 59},
+  {"categoryId": 164, "categoryDescription": "Garbage Bags (Thasë Mbeturinash)", "categoryWeight": 59},
+  {"categoryId": 165, "categoryDescription": "Soaps & Shower Gels (Sapunë dhe Xhel Dushi)", "categoryWeight": 50},
+  {"categoryId": 166, "categoryDescription": "Shampoos & Conditioners (Shampon dhe Balsam Flokësh)", "categoryWeight": 50},
+  {"categoryId": 167, "categoryDescription": "Oral Care (Kujdesi Oral)", "categoryWeight": 50},
+  {"categoryId": 168, "categoryDescription": "Deodorants & Antiperspirants (Deodorantë)", "categoryWeight": 50},
+  {"categoryId": 169, "categoryDescription": "Skin Care (Kujdesi i Lëkurës)", "categoryWeight": 50},
+  {"categoryId": 170, "categoryDescription": "Feminine Hygiene (Higjiena Femërore)", "categoryWeight": 50},
+  {"categoryId": 171, "categoryDescription": "Paper Products (Produkte Letre)", "categoryWeight": 59},
+  {"categoryId": 172, "categoryDescription": "Baby Diapers & Wipes (Pelena dhe Letra të Lagura për Foshnje)", "categoryWeight": 7},
+  {"categoryId": 173, "categoryDescription": "Other", "categoryWeight": 1}
+]
+
 
 Extract the sale end dates either from the given post text: "${postText || ''}" or from the image itself. Return it in the format YYYY-MM-DD.
 If there are multiple dates, return the latest one. If the year is missing, use the current year (${currentYear}). If the sale end date is missing, use today's date: ${formattedToday}.
