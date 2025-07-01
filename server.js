@@ -1437,7 +1437,7 @@ to the categoryDescription in may belong in the array given.
   {"categoryId": 171, "categoryDescription": "Paper Products (Produkte Letre)", "categoryWeight": 59},
   {"categoryId": 172, "categoryDescription": "Baby Diapers & Wipes (Pelena dhe Letra të Lagura për Foshnje)", "categoryWeight": 7},
   {"categoryId": 173, "categoryDescription": "Other", "categoryWeight": 1}
-]
+]       
 
 
 Extract the sale end dates either from the given post text: "${postText || ''}" or from the image itself. Return it in the format YYYY-MM-DD.
