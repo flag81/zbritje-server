@@ -1195,10 +1195,12 @@ async function insertProducts1(jsonData) {
   try {
     await dbQuery('START TRANSACTION');
     for (const product of products) {
-      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id } = product;
-      console.log('Processing product:', product_description);
+      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId } = product;
+      console.log('Processing product:', product);
 
-      allMessages.push(`Processing product: ${product_description}`);
+      console.log('Product postId:', postId );
+
+      allMessages.push(`Processing product: ${product}`);
 
       // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
 // if the price is missing or null set it to 0
@@ -1212,9 +1214,9 @@ async function insertProducts1(jsonData) {
 
 
       const productResult = await dbQuery(
-        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id ]
+        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId ]
       );
 
       const productId = productResult.insertId;
@@ -1438,6 +1440,7 @@ to the categoryDescription in may belong in the array given.
   {"categoryId": 172, "categoryDescription": "Baby Diapers & Wipes (Pelena dhe Letra të Lagura për Foshnje)", "categoryWeight": 7},
   {"categoryId": 173, "categoryDescription": "Other", "categoryWeight": 1}
 ]       
+
 
 
 Extract the sale end dates either from the given post text: "${postText || ''}" or from the image itself. Return it in the format YYYY-MM-DD.
@@ -2037,7 +2040,9 @@ app.get("/getProducts", async (req, res) => {
 
        ORDER BY matched_keyword_count DESC,  productOnSale DESC , categoryWeight DESC, p.productId DESC
     */
-    ORDER BY p.productId DESC
+    
+    ORDER BY matched_keyword_count DESC,  productOnSale DESC , categoryWeight DESC, p.productId DESC
+    
     LIMIT ? OFFSET ?
   `;
 
@@ -2055,6 +2060,20 @@ app.get("/getProducts", async (req, res) => {
 });
 
 // --- MODIFIED: /getProducts endpoint ---
+
+
+// add api endpoint to get distinc postId from products table
+app.get("/getPostIds", (req, res) => {
+  const q = `SELECT DISTINCT postId FROM products WHERE postId IS NOT NULL`;
+  db.query(q, (err, data
+) => {
+    if (err) {
+      console.log("getDistinctPostIds error:", err);
+      return res.json(err);
+    }
+    return res.json(data);
+  });
+});
 
 
 
