@@ -432,20 +432,23 @@ app.get('/facebook-posts', async (req, res) => {
     const posts = await fetchFacebookPosts(pageId);
     debugMessages.push(`✅ [facebook-posts] fetchFacebookPosts returned ${posts.length} posts`);
     console.log(`✅ [facebook-posts] fetchFacebookPosts returned:`, posts);
+    debugMessages.push(`✅ [facebook-posts] fetchFacebookPosts returned: ${posts}`);
 
     // Flatten posts to array of photo objects for frontend compatibility
     const items = [];
     posts.forEach((post, postIdx) => {
       debugMessages.push(`🔎 [facebook-posts] Post #${postIdx + 1}: message="${post.message}", images=${(post.images || []).length}`);
-      (post.images || []).forEach((uri, imgIdx) => {
+      (post.images || []).forEach((imgObj, imgIdx) => {
         items.push({
-          postId: post.postId || `post_${postIdx + 1}`,
+          postId: post.postId,
           message: post.message,
           created_time: post.created_time,
-          uri,
-          image: uri,
+          uri: imgObj.uri,
+          image: imgObj.uri,
+          imageData: post.imageData ,
+          imageId: imgObj.id
         });
-        debugMessages.push(`  📸 [facebook-posts] Added image #${imgIdx + 1} for post #${postIdx + 1}: ${uri}`);
+        debugMessages.push(`  📸 [facebook-posts] Added image #${imgObj.id} for post #${post.postId}:`);
       });
     });
 
@@ -712,8 +715,11 @@ app.post('/extract-text-single', async (req, res) => {
 
 console.log('🔍 [extract-text-single] Received images:', images);
 console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
+console.log('🔍 [extract-text-single] Image idss', images[0].imageId) ;
 
+allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(images)}`);
 
+ 
   if (!images[0].storeId) {
     console.error('❌ Missing storeId in request body.');
     return res.status(400).json({ message: 'Missing storeId in request body.' });
@@ -737,17 +743,31 @@ console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
 
   // Upload all new images to Cloudinary
   const { uploadMultipleFacebookPhotosToCloudinary } = await import('./uploadFacebookPhoto.js');
-  const imageUrlsToUpload = images.map(img => img.imageUrl );
-  let cloudinaryUrls = [];
-  try {
-    cloudinaryUrls = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
-    console.log('✅ Uploaded URLs to Cloudinary:', cloudinaryUrls);
-    allMessages.push(`✅ Uploaded URLs to Cloudinary: ${JSON.stringify(cloudinaryUrls)}`);
-  } catch (err) {
-    console.error('❌ Error uploading images to Cloudinary:', err);
-    return res.status(500).json({ error: 'Failed to upload images to Cloudinary', details: err.message });
-  }
 
+  //const imageUrlsToUpload = images.map(img => img.imageUrl + '&imageId=' + img.imageId );
+
+  // make imageUrlsToUpload an array of objects of image URLs to upload with imageUrl and imageId
+
+  const imageUrlsToUpload = images.map(img => ({
+    imageUrl: img.imageUrl,
+    imageId: img.imageId,
+    
+  }));
+
+
+  let uploadResults = [];
+  let cloudinaryUrls = [];
+
+
+    try {
+      uploadResults = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
+      cloudinaryUrls = uploadResults.map(img => img.uploadedUrl);
+      //imageIds = uploadResults.map(img => img.imageId);
+      console.log('✅ Uploaded images to Cloudinary.');
+    } catch (err) {
+      console.error('❌ Error uploading images to Cloudinary:', err);
+      return res.status(500).json({ error: 'Failed to upload images to Cloudinary', details: err.message });
+    }
 
   // print storeId and userId from images 
   console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
@@ -759,7 +779,7 @@ console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
   const flyerBookId = images[0].flyerBookId // Generate random flyerBookId if not provided
   // Optionally, collect postText and facebookUrl if you want to use them in formatDataToJson
   const postText = newImages.map(img => img.postText || '');
-
+  const imageId = images[0].imageId; 
   // print potText array
 
 
@@ -767,21 +787,26 @@ console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
 
   console.log('🔍 [extract-text-single] Post Text Array:', postText);
   console.log('🔍 [extract-text-single] postId:', postId);
+  console.log('🔍 [extract-text-single] photo ID:', storeId);
+  //console.log('🔍 [extract-text-single] Image Data Array:', imageId);
   allMessages.push(`🔍 [extract-text-single] Post Text Array: ${JSON.stringify(postText)}`);
   allMessages.push(`🔍 [extract-text-single] postId: ${postId}`);
+  allMessages.push(`🔍 [extract-text-single] photo ID: ${storeId}`);
+  allMessages.push(`🔍 [extract-text-single] imageId: ${imageId}`);
+  //allMessages.push(`🔍 [extract-text-single] Image Data Array: ${JSON.stringify(imageData)}`);
 
 
   try {
     // Call formatDataToJson with all uploaded Cloudinary URLs
     const products = await formatDataToJson(
-      cloudinaryUrls,
-      cloudinaryUrls,
+      uploadResults,
       storeId,
       userId,
       flyerBookId,
       postText, // Pass postText array if needed
       // Optionally add: postText, facebookUrl
-      postId
+      postId,
+      imageId
     );
 
 
@@ -806,105 +831,6 @@ console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
 // ...existing code...
 
 
-app.post('/extract-text-single0', async (req, res) => {
-
-  console.log('🔍 Extracting data from image using Gemini 1.5 Pro…');
-
-  // Assuming userId is available from authentication middleware or session
-  // Replace with your actual way of getting userId
-  const userId = req.user ? req.user.userId : 1; // Example: Get from req.user if using auth middleware, default to 1
-
-  const { imageUrl, imageId, storeId, flyerBookId , facebookUrl } = req.body;
-
-  console.log('Store ID:', storeId);
-  console.log('User ID:', userId); // Log userId
-  console.log('Image file:', imageUrl);
-  console.log('flyerBookId:', flyerBookId);
-  console.log('Facebook URL:', facebookUrl); // Log Facebook URL if provided
-  console.log('Image ID:', imageId); // Log Image ID if provided
-
-
-  //check if ythe imageiId provided is in database facebookPhotos table
-  if (!imageId) {
-    console.error('❌ No imageId provided.');
-    return res.status(400).json({ message: 'No imageId provided.' });
-  }
-  const checkQuery = `SELECT * FROM facebookPhotos WHERE facebookId = ?`;
-  const checkValues = [imageId];
-  const checkResult = await queryPromise(checkQuery, checkValues);
-  if (checkResult.length > 0) {
-    console.log(`✅ Image ID ${imageId} already exists in database.`);
-    allMessages.push(`✅ Image ID ${imageId} already exists in database.`);
-
-    return res.status(400).json({ message: 'Image ID already exists in database.' });
-  }
-  console.log(`✅ Image ID ${imageId} does not exist in database, proceeding with upload.`);
-
-  allMessages.push(`✅ Image ID ${imageId} does not exist in database, proceeding with upload.`);
-
-
-  
-  try {
-
-
-
-
-    const cloudinaryUrl = await uploadFacebookPhotoToCloudinary(imageUrl);
-
-    console.log('✅ Uploaded URL cloudinaryc:', cloudinaryUrl);
-
-    allMessages.push(`✅ Uploaded URL cloudinaryc: ${cloudinaryUrl}`);
-
-    if( !cloudinaryUrl ) {
-
-      console.error('❌ Failed to upload image to Cloudinary');
-      return res.status(500).json({ error: 'Failed to upload image to Cloudinary' });
-
-    }
-
-
-    try{
-
-     // get the current year 
-     
-
-
-      const jsonText = await formatDataToJson(cloudinaryUrl, cloudinaryUrl, storeId, userId, flyerBookId); // Pass imageUrl as data source and metadata
-      console.log('✅ Formatted JSON from Gemini:', jsonText);
-
-      allMessages.push(`✅ Formatted JSON from Gemini: ${jsonText}`);
-
-    }
-    catch (err) {
-      console.error('❌ Error formatting data to JSON:', err);
-      return res.status(500).json({ error: 'Failed to format data', details: err.message });
-    }
-  /// add functionality to save the image to db tbl facebookPhotos with the id AUTO_INCREMENT and the imageId fields
-
-    try {
-      const insertQuery = `INSERT INTO facebookPhotos (facebookId) VALUES (?)`;
-      const values = [imageId];
-      await queryPromise(insertQuery, values);
-      console.log('✅ Image data saved to database with imageId:', imageId);
-      allMessages.push(`✅ Image data saved to database with imageId: ${imageId}`);
-
-    } catch (dbErr) {
-      console.error('❌ Error saving image data to database:', dbErr);
-
-      allMessages.push(`❌ Error saving image data to database: ${dbErr.message}`);
-      // Continue execution even if database save fails
-    }
-    
-    // Respond with the Cloudinary URL
-
-
-    res.json({ cloudinaryUrl, allMessages });
-  } catch (err) {
-    res.status(500).json({ error: 'Upload failed', details: err.message });
-  }
-
-
-});
 
 
 
@@ -1195,12 +1121,12 @@ async function insertProducts1(jsonData) {
   try {
     await dbQuery('START TRANSACTION');
     for (const product of products) {
-      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId } = product;
+      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId , imageId } = product;
       console.log('Processing product:', product);
 
       console.log('Product postId:', postId );
 
-      allMessages.push(`Processing product: ${product}`);
+      allMessages.push(`Processing product with ImageId: ${imageId}`);
 
       // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
 // if the price is missing or null set it to 0
@@ -1214,9 +1140,9 @@ async function insertProducts1(jsonData) {
 
 
       const productResult = await dbQuery(
-        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId ]
+        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId ]
       );
 
       const productId = productResult.insertId;
@@ -1322,17 +1248,17 @@ Return the date in the format YYYY-MM-DD. If no date is found, return "No date f
  * - Collects and returns all extracted product objects in a single array.
  * - Adds extensive debugging for each step and image.
  */
-async function formatDataToJson(imageUrls, originalImageUrls, storeId, userId, flyerBookId, postText, postId) {
+async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, postText, postId, imageId) {
   console.log('🔍 [formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...');
-  console.log('Metadata received: Image URLs:', originalImageUrls, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
+  console.log('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);  
+  console.log('Image ID from formatDataToJson:', imageId); // Log imageId if provided
 
-
-   allMessages.push('Metadata received: Image URLs:', originalImageUrls, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
+   allMessages.push('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
   allMessages.push(`[formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...`);
+ allMessages.push(`[formatDataToJson] Image URLs: ${JSON.stringify(uploadResults)}`);
+ //for imageId 
+  allMessages.push(`[formatDataToJson] Image ID: ${imageId}`); // Log imageId if provided
 
-  // Ensure imageUrls is always an array
-  const urlsArray = Array.isArray(imageUrls) ? imageUrls : [imageUrls];
-  const originalUrlsArray = Array.isArray(originalImageUrls) ? originalImageUrls : [originalImageUrls];
 
   // Get today's date in YYYY-MM-DD format
   const today = new Date();
@@ -1340,14 +1266,15 @@ async function formatDataToJson(imageUrls, originalImageUrls, storeId, userId, f
   const currentYear = today.getFullYear();
 
   allMessages.push(`[formatDataToJson] Formatted Today: ${formattedToday}`);
-  allMessages.push(`[formatDataToJson] Processing ${urlsArray.length} images individually.`);
+  allMessages.push(`[formatDataToJson] Processing ${uploadResults.length} images individually.`);
 
   let allProducts = [];
 
-  for (let i = 0; i < urlsArray.length; i++) {
-    const url = urlsArray[i];
-    const origUrl = originalUrlsArray[i] || url;
-    console.log(`🔎 [formatDataToJson] Processing image #${i + 1}: ${url}`);
+  for (let i = 0; i < uploadResults.length; i++) {
+       const { uploadedUrl, imageId } = uploadResults[i];
+    const url = uploadedUrl;
+    const origUrl = uploadedUrl;
+    console.log(`🔎 [formatDataToJson] Processing image #${i + 1}:`, url);
 
     // Compose the Gemini prompt for this image
     const geminiPrompt = 
@@ -1458,6 +1385,7 @@ For each distinct product entry you identify in the image, create a JSON object 
 * \`storeId\` (number): Use the provided value: ${storeId}.
 * \`userId\` (number): Use the provided value: ${userId}.
 * \`postId\` (number): Use the provided value: ${postId}.
+* \`imageId\` (number): Use the provided value: ${imageId}.
 * \`image_url\` (string): Use the current url of the image being processed store in ${url}.
 
 * \`category_id\` (number or null): The numerical value of the categoryId extract from categories array.
@@ -1520,6 +1448,8 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
         const validProducts = Array.isArray(products)
           ? products.filter(product => product.valid_product !== false)
           : [];
+
+          allMessages.push(`[formatDataToJson] Valid products extracted for image #${i + 1}: ${validProducts}`);
 
         // Call the insertion function with the parsed products array
         if (validProducts.length > 0) {
