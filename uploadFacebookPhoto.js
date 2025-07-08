@@ -43,25 +43,33 @@ console.log('📸 Uploading Facebook photo to Cloudinary:', imageUrl);
   }
 }
 
-export async function uploadMultipleFacebookPhotosToCloudinary(imageUrls) {
-  if (!Array.isArray(imageUrls)) {
+export async function uploadMultipleFacebookPhotosToCloudinary(imageObjs) {
+  if (!Array.isArray(imageObjs)) {
     throw new Error('imageUrls must be an array');
   }
-  console.log('📸 Uploading multiple Facebook photos to Cloudinary:', imageUrls);
+  console.log('📸 Uploading multiple Facebook photos to Cloudinary:', imageObjs);
 
-  const uploadedUrls = [];
-  for (let i = 0; i < imageUrls.length; i++) {
-    const url = imageUrls[i];
+
+  // imageUrls is an array of objects with imageUrl and imageId
+  if (imageObjs.length === 0) { 
+    console.warn('⚠️ No images to upload.');
+    return [];
+  }
+
+
+  const uploadedResults = [];
+  for (let i = 0; i < imageObjs.length; i++) {
+    const { imageUrl, imageId } = imageObjs[i];
     try {
-      console.log(`➡️ [${i + 1}/${imageUrls.length}] Uploading: ${url}`);
-      const uploadedUrl = await uploadFacebookPhotoToCloudinary(url);
-      uploadedUrls.push(uploadedUrl);
-      console.log(`✅ Uploaded: ${uploadedUrl}`);
+      console.log(`➡️ [${i + 1}/${imageObjs.length}] Uploading: ${imageUrl} (imageId: ${imageId})`);
+      const uploadedUrl = await uploadFacebookPhotoToCloudinary(imageUrl);
+      uploadedResults.push({ imageId, uploadedUrl });
+      console.log(`✅ Uploaded: ${uploadedUrl} (imageId: ${imageId})`);
     } catch (err) {
-      console.error(`❌ Failed to upload image at index ${i}: ${url}`, err.message);
-      uploadedUrls.push(null); // Or skip, or handle as needed
+      console.error(`❌ Failed to upload image at index ${i}: ${imageUrl} (imageId: ${imageId})`, err.message);
+      uploadedResults.push({ imageId, uploadedUrl: null }); // Or handle as needed
     }
   }
-  console.log('📦 All uploads complete:', uploadedUrls);
-  return uploadedUrls;
+  console.log('📦 All uploads complete:', uploadedResults);
+  return uploadedResults;
 }
