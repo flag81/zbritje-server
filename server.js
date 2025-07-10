@@ -361,6 +361,7 @@ app.use(identifyUserMiddleware);
 
 
 import authRoutes from "./routes/authRoutes.js";
+import { time } from 'console';
 app.use("/auth", authRoutes);
 
 
@@ -446,7 +447,8 @@ app.get('/facebook-posts', async (req, res) => {
           uri: imgObj.uri,
           image: imgObj.uri,
           imageData: post.imageData ,
-          imageId: imgObj.id
+          imageId: imgObj.id,
+          timestamp: post.timestamp // Use post timestamp or current time
         });
         debugMessages.push(`  📸 [facebook-posts] Added image #${imgObj.id} for post #${post.postId}:`);
       });
@@ -780,8 +782,13 @@ allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(i
   // Optionally, collect postText and facebookUrl if you want to use them in formatDataToJson
   const postText = newImages.map(img => img.postText || '');
   const imageId = images[0].imageId; 
+
+  const timestamp = images[0].timestamp // Use created_time or current time
   // print potText array
 
+  
+
+  console.log('🔍 [extract-text-single] timestamp', timestamp);
 
 
 
@@ -793,6 +800,7 @@ allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(i
   allMessages.push(`🔍 [extract-text-single] postId: ${postId}`);
   allMessages.push(`🔍 [extract-text-single] photo ID: ${storeId}`);
   allMessages.push(`🔍 [extract-text-single] imageId: ${imageId}`);
+  allMessages.push(`🔍 [extract-text-single] timestamp: ${timestamp}`);
   //allMessages.push(`🔍 [extract-text-single] Image Data Array: ${JSON.stringify(imageData)}`);
 
 
@@ -806,7 +814,8 @@ allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(i
       postText, // Pass postText array if needed
       // Optionally add: postText, facebookUrl
       postId,
-      imageId
+      imageId,
+      timestamp // Pass timestamp if needed
     );
 
 
@@ -1121,12 +1130,16 @@ async function insertProducts1(jsonData) {
   try {
     await dbQuery('START TRANSACTION');
     for (const product of products) {
-      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId , imageId } = product;
+      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId , imageId, timestamp } = product;
       console.log('Processing product:', product);
 
       console.log('Product postId:', postId );
 
+      console.log('timestamp insert product:', timestamp);
+      
+
       allMessages.push(`Processing product with ImageId: ${imageId}`);
+      allMessages.push(`timestamp in insert : ${timestamp}`);
 
       // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
 // if the price is missing or null set it to 0
@@ -1140,9 +1153,9 @@ async function insertProducts1(jsonData) {
 
 
       const productResult = await dbQuery(
-        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId ]
+        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId , timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? , ?)`,
+        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId, timestamp ]
       );
 
       const productId = productResult.insertId;
@@ -1248,7 +1261,7 @@ Return the date in the format YYYY-MM-DD. If no date is found, return "No date f
  * - Collects and returns all extracted product objects in a single array.
  * - Adds extensive debugging for each step and image.
  */
-async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, postText, postId, imageId) {
+async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, postText, postId, imageId, timestamp) {
   console.log('🔍 [formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...');
   console.log('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);  
   console.log('Image ID from formatDataToJson:', imageId); // Log imageId if provided
@@ -1265,8 +1278,21 @@ async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, pos
   const formattedToday = today.toISOString().split('T')[0];
   const currentYear = today.getFullYear();
 
+
+  // FORMAT timestmp UNIX TIME STAMP TO YYYY-MM-DD HH:mm:ss format
+  const date = new Date(timestamp * 1000); // Convert UNIX timestamp to milliseconds
+  const formattedTimestamp = date.toISOString().split('T')[0] + ' ' + date.toTimeString().split(' ')[0]; // Format to YYYY-MM-DD HH:mm:ss
+  //const formattedTimestamp = new Date(timestamp).toISOString().split('T')[0];
+
+ // const formattedTimestamp = new Date(timestamp * 1000);
+
+  //const formattedTimestamp = date.toString()
+
+  console.log(`[formatDataToJson] Formatted Timestamp: ${formattedTimestamp}`);
+
   allMessages.push(`[formatDataToJson] Formatted Today: ${formattedToday}`);
   allMessages.push(`[formatDataToJson] Processing ${uploadResults.length} images individually.`);
+  allMessages.push(`[formatDataToJson] Formatted Timestamp: ${formattedTimestamp}`);
 
   let allProducts = [];
 
@@ -1386,6 +1412,7 @@ For each distinct product entry you identify in the image, create a JSON object 
 * \`userId\` (number): Use the provided value: ${userId}.
 * \`postId\` (number): Use the provided value: ${postId}.
 * \`imageId\` (number): Use the provided value: ${imageId}.
+* \`timestamp\` (timestamp): Use the provided value: ${formattedTimestamp}.
 * \`image_url\` (string): Use the current url of the image being processed store in ${url}.
 
 * \`category_id\` (number or null): The numerical value of the categoryId extract from categories array.

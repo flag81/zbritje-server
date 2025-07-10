@@ -15,8 +15,20 @@ export async function fetchFacebookPosts(pageId) {
 
     const posts = response.data.results || []; // ✅ FIXED: define 'posts'
 
+    console.log(`📸 Found ${posts} posts for page: ${pageId}`); // Log the number of posts found
+
     const parsedPosts = posts.map(post => {
       const message = post.message || "";
+
+      const timestamp = post.timestamp || "";
+
+     console.log(`📸 Post timestamp: ${timestamp}`); // Log the timestamp for debugging
+
+      const formattedTimeStamp = new Date(timestamp * 1000).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      });
 
       const imageId = post.id || ""; // Use post.image.id if available, otherwise empty string
 
@@ -35,6 +47,7 @@ export async function fetchFacebookPosts(pageId) {
         imageData = post.album_preview?.map(img => ({
           uri: img.image_file_uri,
           id: img.id,
+
         }));
       }
 
@@ -60,7 +73,8 @@ export async function fetchFacebookPosts(pageId) {
         images, // Will be [] if no media found
         imageData, // Will be [] if no media found
         postId, // Add postId to the returned object
-        imageId
+        imageId,
+        timestamp, // Add formatted date
 
       };
     });
