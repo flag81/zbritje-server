@@ -5,6 +5,7 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 
 
+
 // We no longer need groupTextElementsSpatially if extracting directly from image
 // import { groupTextElementsSpatially } from './utils.js';
 
@@ -337,11 +338,19 @@ const corsOptions = {
   origin: [process.env.FRONTEND_URL, process.env.FRONTEND_URL2,
     'http://localhost:5173',
     'http://192.168.1.2:5173', // Allow local network IPs
-    'http://192.168.1.2:3000', // Add your server's local IP
-    'http://localhost:5173/dashboard',
+    'http://192.168.1.5:3000', // Add your server's local IP
+    // how to  allow local network IPs in CORS?
+    'http://192.168.1.x', // Allow all local network IPs
+    'http://localhost:3000', // Allow local development
+    'http://localhost:8081', // Allow local development
+    'http://localhost:8080', // Allow local development
+    'http://192.168.1.5:8081', 
     'https://www.meniven.com',
     'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
-    'https://singular-catfish-deciding.ngrok-free.app'] , // Replace with your frontend's origin
+    'https://singular-catfish-deciding.ngrok-free.app',
+    // This regex allows any IP on the 192.168.1.x subnet with any port
+    /^http:\/\/192\.168\.1\.\d{1,3}(:\d+)?$/ 
+  ] , // Replace with your frontend's origin
   credentials: true,
   origin: true,
   sameSite: 'none', 
@@ -940,52 +949,78 @@ app.get('/initialize0', (req, res) => {
 });
 
 
+app.get('/initialize-anonymous', async (req, res) => {
+  try {
+    // Insert a new anonymous user into the database
+    // The `userId` will be auto-incremented. Other fields are nullable.
+    const [result] = await db.promise().query('INSERT INTO users () VALUES ()');
+    
+    const userId = result.insertId;
+    if (!userId) {
+      return res.status(500).json({ message: 'Failed to create anonymous user.' });
+    }
+
+    console.log(`[API] Created new anonymous user with ID: ${userId}`);
+
+    // Create a long-lived token for the anonymous user
+    const token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '2y' });
+
+    res.json({ token });
+  } catch (error) {
+    console.error('[API] Error initializing anonymous session:', error);
+    res.status(500).json({ message: 'Server error during initialization.' });
+  }
+});
+
+
+// ...existing code...
 app.get('/initialize', async (req, res) => { // Added async
   console.log('🟢 Initialize endpoint hit');
 
   // Check if user is already identified by the middleware
-  // Check if user is already identified by the middleware
   if (req.identifiedUser && req.identifiedUser.userId) {
     console.log('✅ User already identified:', req.identifiedUser.userId);
-    return res.json({ message: 'User identified', userId: req.identifiedUser.userId });
+    // Also send the token in the body for mobile clients that might need it
+    const token = req.headers.authorization?.split(' ')[1] || req.cookies.jwt;
+    return res.json({ message: 'User identified', userId: req.identifiedUser.userId, token });
   }
-
-
 
   // If no valid identified user, generate a new one
   console.log('⚠️ No valid user identified. Generating new anonymous user.');
-  //const anonymousUserId = Math.random().toString(36).substring(2) + Date.now().toString(36); // Make it more unique
   
   const anonymousUserId = `anon_${Date.now()}`;
-  console.log('Generated Anonymous User ID:', anonymousUserId);
-  const tokenPayload = { userId: anonymousUserId }; // Only include userId for anonymous
-  const token = jwt.sign(tokenPayload, process.env.TOKEN_SECRET, { expiresIn: '30d' }); // Longer expiry for anonymous?
+  const tokenPayload = { userId: anonymousUserId };
+  const token = jwt.sign(tokenPayload, process.env.TOKEN_SECRET, { expiresIn: '30d' });
 
-  console.log('Generated Anonymous JWT Payload:', tokenPayload);
+
+  console.log('Generated Anonymous JWT:', token);
 
   try {
     // Insert placeholder for anonymous user
-    // Assumes userId is the primary key (string) and other fields allow NULL
     const insertQuery = `
       INSERT INTO users (userId, userName, is_registered)
       VALUES (?, ?, ?)
-      ON DUPLICATE KEY UPDATE userId=userId`; // Handle potential rare collision, or use UUIDs
-    await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]); // Store anonymous ID
+      ON DUPLICATE KEY UPDATE userId=userId`;
+    await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]);
 
+    // Set cookie for web clients
     res.cookie('jwt', token, {
         httpOnly: true,
         secure: true, 
-        sameSite: 'None', // Important for cross-site contexts if needed, else 'Lax'
-        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days expiry for cookie
+        sameSite: 'None',
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     });
-    console.log('✅ Anonymous user initialized and JWT cookie set.');
-    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId });
+
+    console.log('✅ Anonymous user initialized. JWT cookie set for web. Token sent in body for mobile.');
+    // Return the token in the body for the mobile app
+    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId, token: token });
 
   } catch (err) {
       console.error('❌ Error inserting new anonymous user into database:', err);
       return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
   }
 });
+// ...existing code...
 
 
 app.get('/initialize2', (req, res) => {
