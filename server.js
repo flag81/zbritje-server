@@ -3,8 +3,33 @@ import cloudinary from './cloudinaryConfig.js';
 import cors from 'cors';
 import fs from 'fs';
 import dotenv from 'dotenv';
+import { sendDailyProductNotifications } from './notificationScheduler.js';
 
 
+// --- START: CRITICAL CREDENTIALS DEBUGGING ---
+// This block will help us verify if the server can find and read your credentials file.
+try {
+  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (!credentialsPath) {
+    console.error('❌ FATAL: GOOGLE_APPLICATION_CREDENTIALS environment variable is NOT SET.');
+  } else {
+    console.log(`✅ GOOGLE_APPLICATION_CREDENTIALS is set to: ${credentialsPath}`);
+    if (fs.existsSync(credentialsPath)) {
+      console.log('✅ Credentials file exists at the specified path.');
+      const fileContent = fs.readFileSync(credentialsPath, 'utf8');
+      const credentials = JSON.parse(fileContent);
+      if (credentials.private_key && credentials.client_email) {
+        console.log('✅ Credentials file was read and parsed successfully. It contains the required keys.');
+      } else {
+        console.error('❌ FATAL: Credentials file is missing required keys like "private_key" or "client_email".');
+      }
+    } else {
+      console.error(`❌ FATAL: Credentials file NOT FOUND at path: ${credentialsPath}`);
+    }
+  }
+} catch (e) {
+  console.error('❌ FATAL: An error occurred during credential verification:', e);
+}
 
 // We no longer need groupTextElementsSpatially if extracting directly from image
 // import { groupTextElementsSpatially } from './utils.js';
@@ -14,6 +39,8 @@ import  {queryPromise}  from './dbUtils.js';
 import { uploadFacebookPhotoToCloudinary } from './uploadFacebookPhoto.js';
 
 import { fetchFacebookPosts } from './rapidApi.js';
+
+import { Expo } from 'expo-server-sdk'; // 1. IMPORT THE SDK
 
 
 
@@ -37,7 +64,7 @@ const __dirname = path.dirname(__filename);
 
 const keyFilePath = path.join(__dirname, './persistent/keys/vision-ai-455010-6d2a9944437b.json'); // Ensure this path is correct for your service account key
 
-process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
+//process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
 
 if (!fs.existsSync(keyFilePath)) {
   console.error('❌ Key file not found:', keyFilePath);
@@ -56,7 +83,12 @@ console.log('GOOGLE_CLIENT_SECRET:', process.env.GOOGLE_CLIENT_SECRET);
 
 import { VertexAI } from '@google-cloud/vertexai';
 
-const vertexAI = new VertexAI({project: 'vision-ai-455010', location: 'us-central1'}); // Replace with your project and location
+const vertexAI = new VertexAI({
+  project: 'vision-ai-455010', 
+  location: 'us-central1',
+  keyFilename: keyFilePath, // Path to your service account key file
+
+}); // Replace with your project and location
 
 console.log('✅ VertexAI client initialized in server.js');
 
@@ -281,7 +313,7 @@ app.post("/auth/apple/callback", async (req, res) => {
         return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
       } else {
         console.log(`🆕 New user detected, inserting: ${email || "No email provided"}`);
-        const insertQuery = `INSERT INTO users (userName, email) VALUES (?, ?)`;
+        const insertQuery = `INSERT INTO users (first_name, email) VALUES (?, ?)`;
         db.query(insertQuery, [appleId, email], (insertErr) => {
           if (insertErr) {
             console.error("❌ Error inserting new user:", insertErr);
@@ -380,7 +412,7 @@ app.post('/dashboardLogin', (req, res) => {
   const { username, password } = req.body;
   console.log('🔒 Login attempt:', username);
   console.log('🔒 Password:' , password) ;
-  const query = 'SELECT * FROM users WHERE userName = ? AND password = ?';
+  const query = 'SELECT * FROM users WHERE first_name = ? AND password = ?';
   db.query(query, [username, password], (err, results) => {
     if (err) return res.status(500).json({ message: 'Server error' });
     if (results.length > 0) {
@@ -481,6 +513,93 @@ app.get('/facebook-posts', async (req, res) => {
 
 // ...existing code...
 
+// --- MODIFIED: Manually trigger scheduled notification logic for ALL users ---
+// This endpoint now ignores any userId in the body and runs the full notification job.
+
+// --- NEW: Manually trigger scheduled notification logic for a single user ---
+app.post('/trigger-user-notifications', async (req, res) => {
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required.' });
+  }
+
+  console.log(`[Manual Trigger] Received request for user: ${userId}`);
+
+  try {
+    // 1. Get matching on-sale products for the user based on favorite keywords
+    const matchingProductsQuery = `
+      WITH UserFavoriteKeywords AS (
+        SELECT DISTINCT k.keyword
+        FROM favorites f
+        JOIN productkeywords pk ON f.productId = pk.productId
+        JOIN keywords k ON pk.keywordId = k.keywordId
+        WHERE f.userId = ?
+      ),
+      ProductsOnSale AS (
+        SELECT p.productId, p.product_description, k.keyword
+        FROM products p
+        JOIN productkeywords pk ON p.productId = pk.productId
+        JOIN keywords k ON pk.keywordId = k.keywordId
+        WHERE p.sale_end_date >= CURDATE()
+      )
+      SELECT DISTINCT pos.productId
+      FROM UserFavoriteKeywords ufk
+      JOIN ProductsOnSale pos ON ufk.keyword = pos.keyword;
+    `;
+    const matchingProducts = await queryPromise(matchingProductsQuery, [userId]);
+
+    if (matchingProducts.length === 0) {
+      console.log(`[Manual Trigger] No matching on-sale products found for user ${userId}.`);
+      return res.status(200).json({ message: 'Nuk u gjetën produkte në ofertë që përputhen me preferencat tuaja.' });
+    }
+
+    // 2. Get user's push tokens
+    const tokenResults = await queryPromise('SELECT token FROM push_tokens WHERE user_id = ?', [userId]);
+    if (tokenResults.length === 0) {
+      console.log(`[Manual Trigger] No push tokens found for user ${userId}.`);
+      return res.status(404).json({ message: 'Përdoruesi nuk ka shenja njoftimi të regjistruara.' });
+    }
+    const tokens = tokenResults.map(row => row.token);
+
+    // 3. Construct and send notifications
+    const productIds = matchingProducts.map(p => p.productId);
+    const productCount = productIds.length;
+    const body = `Ju keni ${productCount} produkte në ofertë që përputhen me preferencat tuaja.`;
+    
+    const messages = [];
+    for (const pushToken of tokens) {
+      if (!Expo.isExpoPushToken(pushToken)) continue;
+      messages.push({
+        to: pushToken,
+        sound: 'default',
+        title: '✨ Oferta të Përshtatura për Ju!',
+        body: body,
+        data: { screen: 'ProductsOnSale', productIds: productIds },
+      });
+    }
+
+    if (messages.length === 0) {
+        return res.status(400).json({ message: 'Nuk u gjetën shenja të vlefshme njoftimi.' });
+    }
+
+    const expo = new Expo({ useFcmV1: true });
+    const chunks = expo.chunkPushNotifications(messages);
+    
+    console.log(`[Manual Trigger] Sending ${messages.length} notification(s) to user ${userId}...`);
+    for (let chunk of chunks) {
+        await expo.sendPushNotificationsAsync(chunk);
+    }
+    console.log(`[Manual Trigger] Notifications sent successfully to user ${userId}.`);
+
+    res.status(200).json({ message: `Njoftimi u dërgua me sukses për ${productCount} produkte.` });
+
+  } catch (error) {
+    console.error(`[Manual Trigger] Error processing request for user ${userId}:`, error);
+    res.status(500).json({ error: 'Gabim në server gjatë dërgimit të njoftimit.' });
+  }
+});
+
 
 
 
@@ -558,7 +677,7 @@ app.get("/check-session", async (req, res) => { // Added async
       // User identified by middleware, verify against DB
       try {
           // Fetch necessary details, including registration status/email
-          const query = `SELECT userId, email, userName, is_registered FROM users WHERE userId = ?`;
+          const query = `SELECT id, email, first_name, is_registered FROM users WHERE id = ?`;
           const results = await queryPromise(query, [req.identifiedUser.userId]);
 
           if (results.length === 0) {
@@ -570,13 +689,13 @@ app.get("/check-session", async (req, res) => { // Added async
 
           const user = results[0];
 
-          console.log(`🔍 User found in DB: ${user.userId}, Email: ${user.email || "No email"}`)  ;
+          console.log(`🔍 User found in DB: ${user.id}, Email: ${user.email || "No email"}`)  ;
 
-          console.log(`✅ Session check successful for userId: ${user.userId}, Registered: ${user.is_registered}`);
+          console.log(`✅ Session check successful for userId: ${user.id}, Registered: ${user.is_registered}`);
           return res.json({
               isLoggedIn: true, // Means a valid ID exists
               isRegistered: !!user.is_registered, // Check registration status
-              userId: user.userId,
+              userId: user.id,
               email: user.email // Will be null for anonymous users
           });
 
@@ -998,7 +1117,7 @@ app.get('/initialize', async (req, res) => { // Added async
   try {
     // Insert placeholder for anonymous user
     const insertQuery = `
-      INSERT INTO users (userId, userName, is_registered)
+      INSERT INTO users (userId, first_name, is_registered)
       VALUES (?, ?, ?)
       ON DUPLICATE KEY UPDATE userId=userId`;
     await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]);
@@ -1656,21 +1775,267 @@ app.get("/isFavorite", async (req, res) => { // Added async
 });
 
 
+// ...existing code...
+
+app.post('/register-push-token', identifyUserMiddleware, async (req, res) => {
+  const { token } = req.body;
+  // IMPORTANT: Use the integer `id` from the user object, not the varchar `userId`.
+  //const userId = req.identifiedUser?.id;
+  const userId = req.identifiedUser?.userId;
+
+    console.log(`[Push] Attempting to register token for user ID: ${userId}`);
+
+  if (!userId || !token) {
+    return res.status(400).json({ error: 'User ID and token are required.' });
+  }
+
+  if (!Expo.isExpoPushToken(token)) {
+    console.error(`Push token ${token} is not a valid Expo push token.`);
+    return res.status(400).json({ error: 'Invalid push token.' });
+  }
+
+  try {
+    const q = 'INSERT INTO push_tokens (user_id, token) VALUES (?, ?) ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)';
+    await queryPromise(q, [userId, token]);
+    console.log(`[Push] Registered token for user ${userId}`);
+    res.status(200).json({ message: 'Token registered successfully.' });
+  } catch (err) {
+    console.error('[Push] Error registering token:', err);
+    res.status(500).json({ error: 'Failed to register token.' });
+  }
+});
+
+// ...existing code...
+
+
+
+app.get('/user/preferences', async (req, res) => {
+  if (!req.identifiedUser?.userId) {
+    return res.status(401).json({ error: 'User identification required.' });
+  }
+  try {
+
+
+    console.log(`[API] Getting user preferences for User ID: ${req.identifiedUser.userId}`);
+
+
+    const q = 'SELECT first_name, last_name, email, notification_frequency FROM users WHERE id = ?';
+    const [user] = await queryPromise(q, [req.identifiedUser.userId]);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+    res.json({ 
+      firstName: user.first_name,
+      lastName: user.last_name,
+      email: user.email,
+      notificationFrequency: user.notification_frequency });
+  } catch (err) {
+    console.error('[API] Error getting user preferences:', err);
+    res.status(500).json({ error: 'Failed to get preferences.' });
+  }
+});
+
+// PUT (update) notification preference
+app.put('/user/preferences', async (req, res) => {
+  if (!req.identifiedUser?.userId) {
+    return res.status(401).json({ error: 'User identification required.' });
+  }
+  const { notificationFrequency } = req.body;
+  const validFrequencies = ['daily', 'weekly', 'monthly', 'off'];
+
+  if (!validFrequencies.includes(notificationFrequency)) {
+    return res.status(400).json({ error: 'Invalid notification frequency value.' });
+  }
+
+  try {
+    const q = 'UPDATE users SET notification_frequency = ? WHERE id = ?';
+    await queryPromise(q, [notificationFrequency, req.identifiedUser.userId]);
+    res.json({ message: 'Preferences updated successfully.' });
+  } catch (err) {
+    console.error('[API] Error updating user preferences:', err);
+    res.status(500).json({ error: 'Failed to update preferences.' });
+  }
+});
+
+
+// GET user profile information
+app.get('/user/profile', async (req, res) => {
+  if (!req.identifiedUser?.userId) {
+    return res.status(401).json({ error: 'User identification required.' });
+  }
+  try {
+    console.log(`[API] Getting user profile for User ID: ${req.identifiedUser.userId}`);
+    const q = 'SELECT first_name, last_name, email, notification_frequency FROM users WHERE id = ?';
+    const [user] = await queryPromise(q, [req.identifiedUser.userId]);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+    res.json({ 
+      firstName: user.first_name,
+      lastName: user.last_name,
+      email: user.email,
+      notificationFrequency: user.notification_frequency 
+    });
+  } catch (err) {
+    console.error('[API] Error getting user profile:', err);
+    res.status(500).json({ error: 'Failed to get profile.' });
+  }
+});
+
+// PUT (update) user profile information
+app.put('/user/profile', async (req, res) => {
+  if (!req.identifiedUser?.userId) {
+    return res.status(401).json({ error: 'User identification required.' });
+  }
+  
+  const { firstName, lastName, email, notificationFrequency } = req.body;
+  const validFrequencies = ['daily', 'weekly', 'monthly', 'off'];
+
+  if (notificationFrequency && !validFrequencies.includes(notificationFrequency)) {
+    return res.status(400).json({ error: 'Invalid notification frequency value.' });
+  }
+
+  try {
+    const q = `
+      UPDATE users 
+      SET first_name = ?, last_name = ?, email = ?, notification_frequency = ? 
+      WHERE id = ?
+    `;
+    await queryPromise(q, [
+      firstName, 
+      lastName, 
+      email, 
+      notificationFrequency, 
+      req.identifiedUser.userId
+    ]);
+    res.json({ message: 'Profile updated successfully.' });
+  } catch (err) {
+    console.error('[API] Error updating user profile:', err);
+    res.status(500).json({ error: 'Failed to update profile.' });
+  }
+});
+
+
+// --- NEW: Push Notification Test Endpoint ---
+app.post('/test-push', async (req, res) => {
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required.' });
+  }
+
+  console.log(`[Push Test] Received request to send test notification to User ID: ${userId}`);
+
+  try {
+    // 1. Get the push tokens for the specified user
+    const tokenResults = await queryPromise('SELECT token FROM push_tokens WHERE user_id = ?', [userId]);
+    
+    if (tokenResults.length === 0) {
+      console.log(`[Push Test] No push tokens found for User ID: ${userId}`);
+      return res.status(404).json({ message: 'No push tokens found for this user.' });
+    }
+
+    const tokens = tokenResults.map(row => row.token);
+    console.log(`[Push Test] Found ${tokens.length} token(s). Preparing to send...`);
+
+    // 2. Create the notification message
+    const messages = [];
+    for (const pushToken of tokens) {
+      if (!Expo.isExpoPushToken(pushToken)) {
+        console.error(`Push token ${pushToken} is not a valid Expo push token.`);
+        continue;
+      }
+      messages.push({
+        to: pushToken,
+        sound: 'default',
+        title: '✅ Test Njoftimi',
+        body: `Ky është një test nga serveri për User ID: ${userId}`,
+        data: { withSome: 'data' },
+      });
+    }
+
+    // 3. Send the notifications
+    const expo = new Expo({ useFcmV1: true });
+    const chunks = expo.chunkPushNotifications(messages);
+    const tickets = [];
+
+    console.log('[Push Test] Sending notification chunks to Expo...');
+    for (let chunk of chunks) {
+      try {
+        let ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+        console.log('[Push Test] Received ticket chunk:', ticketChunk);
+        tickets.push(...ticketChunk);
+      } catch (error) {
+        console.error('[Push Test] Error sending push notification chunk:', error);
+      }
+    }
+    console.log('[Push Test] All chunks sent. Awaiting receipts...');
+
+    // --- NEW: Part 2 - Process the receipts ---
+    // Later, after the Expo push notification service has delivered the
+    // notifications to Apple or Google (usually quickly), you can get
+    // the receipts for each notification and check for errors.
+    let receiptIds = [];
+    for (let ticket of tickets) {
+      // NOTE: Not all tickets have IDs; for example, tickets for notifications
+      // that could not be sent will have error information and no receipt ID.
+      if (ticket.id) {
+        receiptIds.push(ticket.id);
+      }
+    }
+
+    let receiptIdChunks = expo.chunkPushNotificationReceiptIds(receiptIds);
+    for (let chunk of receiptIdChunks) {
+      try {
+        let receipts = await expo.getPushNotificationReceiptsAsync(chunk);
+        console.log('[Push Test] Received receipts:', receipts);
+
+        // The receipts object is a map of ticket IDs to receipt objects.
+        for (let receiptId in receipts) {
+          let { status, message, details } = receipts[receiptId];
+          if (status === 'ok') {
+            continue;
+          } else if (status === 'error') {
+            console.error(
+              `[Push Test] ❌ There was an error sending a notification: ${message}`
+            );
+            if (details && details.error) {
+              // The error codes are listed in the Expo documentation:
+              // https://docs.expo.dev/push-notifications/sending-notifications/#individual-errors
+              // E.g., "DeviceNotRegistered" means you probably need to remove the token from your database.
+              console.error(`[Push Test] ❌ Error details:`, details);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[Push Test] Error getting push receipts:', error);
+      }
+    }
+
+    res.status(200).json({ message: 'Test notification request processed. Check server logs for details.' });
+
+  } catch (error) {
+    console.error('[Push Test] Error processing test notification request:', error);
+    res.status(500).json({ error: 'Failed to process test notification request.' });
+  }
+});
+
+
 app.post("/addFavorite", async (req, res) => { // Added async
 
   console.log('Add favorite endpoint hit...');
 
-  let userId = req.identifiedUser ? req.identifiedUser.userId : null;
+  
+  // The user MUST be identified by the middleware to add a favorite.
+  if (!req.identifiedUser || !req.identifiedUser.userId) {
+    console.error('[API] Error: User identification is required to add a favorite.');
+    return res.status(401).json({ error: 'User identification required.' });
+  }
 
-  console.log(' add favorites with User ID:', userId);
-
+  const { userId } = req.identifiedUser;
   const { productId } = req.body;
 
-    // Generate an anonymous userId if none is provided
-    if (!userId) {
-      console.log("[DEBUG] No userId provided, generating anonymous user...");
-      userId = `anon_${Date.now()}`; // Example: Generate a unique anonymous ID
-    }
+  console.log(`[API] Adding favorite for User ID: ${userId} and Product ID: ${productId}`);
 
   if (!productId) {
      return res.status(400).json({ error: 'Product ID is required.' });
@@ -1678,7 +2043,6 @@ app.post("/addFavorite", async (req, res) => { // Added async
 
   const q = `INSERT IGNORE INTO favorites (userId, productId) VALUES (?, ?)`; // Use INSERT IGNORE
 
-  //console.log('SQL Query:', q);
   try {
       await queryPromise(q, [userId, productId]);
       res.status(200).json({ message: 'Favorite added successfully (or already existed)' });
@@ -1693,6 +2057,9 @@ app.delete("/removeFavorite", async (req, res) => { // Added async
     return res.status(401).json({ error: 'User identification required to remove favorites.' });
   }
   const { userId } = req.identifiedUser;
+
+  console.log(`[API] Removing favorite for User ID: ${userId}`);
+
   // Get productId from request body OR query parameters
   const productId = req.body.productId || req.query.productId;
 
@@ -1703,6 +2070,7 @@ app.delete("/removeFavorite", async (req, res) => { // Added async
   const q = `DELETE FROM favorites WHERE userId = ? AND productId = ?`;
   try {
       await queryPromise(q, [userId, productId]);
+      console.log(`[API] Favorite removed for User ID: ${userId} and Product ID: ${productId}`);
       res.status(200).json({ message: 'Favorite removed successfully' });
   } catch (err) {
        console.error('Error removing favorite:', err);
@@ -2288,7 +2656,6 @@ app.post('/upload', upload.array('images', 10), async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to upload image' });
   }
 });
-
 
 
 

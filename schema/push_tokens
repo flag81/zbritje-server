@@ -1,0 +1,8 @@
+CREATE TABLE `push_tokens` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `user_id` VARCHAR(255) NOT NULL,
+  `token` VARCHAR(255) NOT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY `unique_token` (`token`),
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`userId`) ON DELETE CASCADE
+);
