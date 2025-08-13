@@ -26,6 +26,11 @@ export async function exctractSaleEndDate(text) {
   });
 
   const model = 'gemini-1.5-pro-002'; // Use the latest Gemini model';
+
+
+  //gemini-2.5-flash change to in the future
+
+
   const currentDate = new Date().toISOString().slice(0, 10);
 
   // Build the prompt for the LLM

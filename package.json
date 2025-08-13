@@ -38,6 +38,8 @@
     "passport": "^0.7.0",
     "passport-apple": "^2.0.2",
     "passport-google-oauth20": "^2.0.0",
+    "react-native-gesture-handler": "^2.27.2",
+    "react-native-modalize": "^2.1.1",
     "tesseract.js": "^5.1.1",
     "tmp-promise": "^3.0.3",
     "web-push": "^3.6.7"

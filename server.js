@@ -59,6 +59,7 @@ import JSON5 from 'json5';
 const allMessages = [];
 
 
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -412,7 +413,7 @@ app.post('/dashboardLogin', (req, res) => {
   const { username, password } = req.body;
   console.log('🔒 Login attempt:', username);
   console.log('🔒 Password:' , password) ;
-  const query = 'SELECT * FROM users WHERE first_name = ? AND password = ?';
+  const query = 'SELECT * FROM users WHERE first_name = ? AND last_name = ?';
   db.query(query, [username, password], (err, results) => {
     if (err) return res.status(500).json({ message: 'Server error' });
     if (results.length > 0) {
@@ -579,6 +580,7 @@ app.post('/trigger-user-notifications', async (req, res) => {
       });
     }
 
+
     if (messages.length === 0) {
         return res.status(400).json({ message: 'Nuk u gjetën shenja të vlefshme njoftimi.' });
     }
@@ -601,6 +603,62 @@ app.post('/trigger-user-notifications', async (req, res) => {
 });
 
 
+// --- NEW: Manually trigger the full notification job for all eligible users ---
+app.post('/trigger-all-user-notifications', async (req, res) => {
+  console.log('[Manual Trigger] Received request to run the full notification job for all users.');
+  try {
+    // We trigger the function but don't wait for it to finish,
+    // allowing the dashboard to get an immediate response.
+    sendDailyProductNotifications(true); 
+    
+    res.status(202).json({ message: 'Procesi i dërgimit të njoftimeve ka filluar. Kontrolloni regjistrat e serverit për detaje.' });
+  } catch (error) {
+    console.error('[Manual Trigger] Error starting the notification job:', error);
+    res.status(500).json({ error: 'Gabim gjatë fillimit të procesit të njoftimeve.' });
+  }
+});
+
+
+// ...existing code...
+app.get('/products-by-ids', async (req, res) => {
+  const { ids } = req.query; // Expecting a comma-separated string of IDs
+  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
+
+  if (!ids) {
+    return res.status(400).json({ error: 'Product IDs are required.' });
+  }
+
+  // Sanitize input by splitting, parsing to int, and filtering out invalid numbers
+  const productIds = ids.split(',').map(id => parseInt(id.trim(), 10)).filter(Number.isFinite);
+
+  if (productIds.length === 0) {
+    return res.status(400).json({ error: 'No valid product IDs provided.' });
+  }
+
+  try {
+    // UPDATED: The query now joins with the favorites table to check the favorite status for the current user.
+    const query = `
+      SELECT 
+        p.*,
+        f.userId IS NOT NULL AS isFavorite
+      FROM 
+        products p
+      LEFT JOIN 
+        favorites f ON p.productId = f.productId AND f.userId = ?
+      WHERE 
+        p.productId IN (?)
+    `;
+    const products = await queryPromise(query, [userId, productIds]);
+    res.status(200).json(products);
+  } catch (error) {
+    console.error('Error fetching products by IDs:', error);
+    res.status(500).json({ error: 'Failed to fetch products.' });
+  }
+});
+
+
+// API endpoint to get Facebook photo URLs for a specific date
+// ...existing code...
 
 
 // API endpoint to get Facebook photo URLs for a specific date
@@ -1361,9 +1419,10 @@ async function insertProducts1(jsonData) {
 };
 
 
+
+
 // write e function that takes image url and extracts sales end date from the image using Gemini 1.5 Pro 
 // like in functon formatDataToJson but only for sale end date
-
 // change the function to ba an api endpoint that takes image url and returns the sale end date in YYYY-MM-DD format
 
 
@@ -2335,12 +2394,13 @@ app.get("/getProducts", async (req, res) => {
     ${userId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}
   `;
 
+  
   // Main SELECT statement including the dynamic matched_keyword_count
   let q = `
     SELECT
       p.productId, p.product_description, p.old_price, p.new_price,
       p.discount_percentage, p.sale_end_date, p.storeId, p.image_url,
-      s.storeName, p.flyer_book_id,
+      s.storeName, s.logoUrl, p.flyer_book_id,
       ANY_VALUE(pc.categoryWeight) AS categoryWeight,
       GROUP_CONCAT(DISTINCT k.keyword SEPARATOR ',') AS keywords,
       ${matchedKeywordCountSelectSQL},
