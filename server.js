@@ -4,6 +4,8 @@ import cors from 'cors';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { sendDailyProductNotifications } from './notificationScheduler.js';
+import os from 'os'; // <-- FIX: Import the 'os' module
+
 
 
 // --- START: CRITICAL CREDENTIALS DEBUGGING ---
@@ -2729,4 +2731,13 @@ const port = process.env.PORT || 3000;
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
+  // console log the ip address of the machine
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        console.log(`Server IP address: http://${iface.address}:${port}`);
+      }
+    }
+  }
 });
