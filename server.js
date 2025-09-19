@@ -1362,9 +1362,21 @@ async function insertProducts1(jsonData) {
       // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
 // if the price is missing or null set it to 0
 
-      const oldPriceNumber = old_price ? parseFloat(old_price.replace(',', '.').replace('€', '').trim()) : 0;
-      const newPriceNumber = new_price ? parseFloat(new_price.replace(',', '.').replace('€', '').trim()) : 0;
+      // --- FIX: Ensure prices are parsed as numbers before insertion ---
+      const oldPriceNumber = old_price ? parseFloat(String(old_price).replace(',', '.').replace(/[^0-9.-]/g, '')) : 0;
+      const newPriceNumber = new_price ? parseFloat(String(new_price).replace(',', '.').replace(/[^0-9.-]/g, '')) : 0;
 
+
+            // --- FIX: Ensure imageId is treated as a number ---
+      const numericImageId = parseInt(imageId, 10);
+      if (isNaN(numericImageId)) {
+          throw new Error(`Invalid numeric value for imageId: ${imageId}`);
+      }
+
+      allMessages.push(`Processing product with ImageId: ${numericImageId}`);
+      allMessages.push(`timestamp in insert : ${formattedTimestamp}`);
+
+     
 
       console.log('Image URL:', image_url);
       allMessages.push(`Image URL: ${image_url}`);
