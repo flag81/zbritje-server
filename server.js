@@ -1499,13 +1499,40 @@ async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, pos
 
 
   // FORMAT timestmp UNIX TIME STAMP TO YYYY-MM-DD HH:mm:ss format
-  const date = new Date(timestamp * 1000); // Convert UNIX timestamp to milliseconds
-  const formattedTimestamp = date.toISOString().split('T')[0] + ' ' + date.toTimeString().split(' ')[0]; // Format to YYYY-MM-DD HH:mm:ss
+  //const date = new Date(timestamp * 1000); // Convert UNIX timestamp to milliseconds
+  //const formattedTimestamp = date.toISOString().split('T')[0] + ' ' + date.toTimeString().split(' ')[0]; // Format to YYYY-MM-DD HH:mm:ss
   //const formattedTimestamp = new Date(timestamp).toISOString().split('T')[0];
 
  // const formattedTimestamp = new Date(timestamp * 1000);
 
   //const formattedTimestamp = date.toString()
+
+
+    // --- FIX: Robust timestamp parsing ---
+  let date;
+  // Check if timestamp is a valid number (for UNIX timestamps)
+  if (typeof timestamp === 'number' && !isNaN(timestamp)) {
+    date = new Date(timestamp * 1000); // Convert UNIX timestamp to milliseconds
+  } 
+  // Check if timestamp is a non-empty string (for ISO strings)
+  else if (typeof timestamp === 'string' && timestamp.trim() !== '') {
+    date = new Date(timestamp);
+  } 
+  // Fallback if timestamp is null, undefined, or invalid
+  else {
+    console.warn(`[formatDataToJson] Invalid or missing timestamp received. Defaulting to current time.`);
+    date = new Date();
+  }
+
+  // Final check to prevent crash if parsing still fails
+  if (isNaN(date.getTime())) {
+    console.error(`[formatDataToJson] CRITICAL: Failed to parse timestamp '${timestamp}'. Defaulting to current time to avoid crash.`);
+    date = new Date();
+  }
+
+  const formattedTimestamp = date.toISOString().slice(0, 19).replace('T', ' ');
+  // --- END FIX ---
+
 
   console.log(`[formatDataToJson] Formatted Timestamp: ${formattedTimestamp}`);
 
