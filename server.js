@@ -1385,7 +1385,7 @@ async function insertProducts1(jsonData) {
       const productResult = await dbQuery(
         `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId , timestamp)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? , ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId, formattedTimestamp]
+        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, numericImageId, formattedTimestamp]
       );
 
       const productId = productResult.insertId;
