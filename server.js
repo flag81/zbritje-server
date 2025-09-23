@@ -1554,11 +1554,13 @@ async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, pos
 
   let allProducts = [];
 
-  for (let i = 0; i < uploadResults.length; i++) {
-       const { uploadedUrl, imageId } = uploadResults[i];
+   for (let i = 0; i < uploadResults.length; i++) {
+       const { uploadedUrl, imageId: correctImageId } = uploadResults[i]; // <-- FIX: Use the imageId from the upload result
     const url = uploadedUrl;
     const origUrl = uploadedUrl;
     console.log(`🔎 [formatDataToJson] Processing image #${i + 1}:`, url);
+    console.log(`🔎 [formatDataToJson] Using CORRECT Image ID:`, correctImageId); // <-- DEBUG: Log the correct ID
+
 
     // Compose the Gemini prompt for this image
     const geminiPrompt = 
@@ -1669,7 +1671,7 @@ For each distinct product entry you identify in the image, create a JSON object 
 * \`storeId\` (number): Use the provided value: ${storeId}.
 * \`userId\` (number): Use the provided value: ${userId}.
 * \`postId\` (number): Use the provided value: ${postId}.
-* \`imageId\` (number): Use the provided value: ${imageId}.
+* \`imageId\` (number): Use the provided value: ${correctImageId}.
 * \`timestamp\` (timestamp): Use the provided value: ${formattedTimestamp}.
 * \`image_url\` (string): Use the current url of the image being processed store in ${url}.
 
