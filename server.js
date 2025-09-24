@@ -353,7 +353,7 @@ app.post("/auth/apple/callback", async (req, res) => {
 
 
 // Specify the model you want to use (e.g., Gemini 1.5 Pro)
-const model = 'gemini-1.5-pro-002';
+const model = 'gemini-2.5-pro'; // Updated to Gemini 2.5 Pro
 
 // Access the generative model
 const generativeModel = vertexAI.getGenerativeModel({
@@ -1554,13 +1554,11 @@ async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, pos
 
   let allProducts = [];
 
-   for (let i = 0; i < uploadResults.length; i++) {
-       const { uploadedUrl, imageId: correctImageId } = uploadResults[i]; // <-- FIX: Use the imageId from the upload result
+  for (let i = 0; i < uploadResults.length; i++) {
+       const { uploadedUrl, imageId } = uploadResults[i];
     const url = uploadedUrl;
     const origUrl = uploadedUrl;
     console.log(`🔎 [formatDataToJson] Processing image #${i + 1}:`, url);
-    console.log(`🔎 [formatDataToJson] Using CORRECT Image ID:`, correctImageId); // <-- DEBUG: Log the correct ID
-
 
     // Compose the Gemini prompt for this image
     const geminiPrompt = 
@@ -1671,7 +1669,7 @@ For each distinct product entry you identify in the image, create a JSON object 
 * \`storeId\` (number): Use the provided value: ${storeId}.
 * \`userId\` (number): Use the provided value: ${userId}.
 * \`postId\` (number): Use the provided value: ${postId}.
-* \`imageId\` (number): Use the provided value: ${correctImageId}.
+* \`imageId\` (number): Use the provided value: ${imageId}.
 * \`timestamp\` (timestamp): Use the provided value: ${formattedTimestamp}.
 * \`image_url\` (string): Use the current url of the image being processed store in ${url}.
 
