@@ -2397,7 +2397,18 @@ LIMIT 100
 app.get("/getProducts", async (req, res) => {
   console.log('getProducts endpoint hit');
   const userId = req.identifiedUser ? req.identifiedUser.userId : null;
-  let storeId = parseInt(req.query.storeId, 10);
+
+  // Support single storeId OR comma-separated list of storeIds (client may send CSV)
+  const storeIdsParam = req.query.storeId || req.query.storeIds || "";
+  let storeIds = null;
+  if (storeIdsParam && typeof storeIdsParam === "string") {
+    const parsed = storeIdsParam
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter(Number.isFinite);
+    if (parsed.length > 0) storeIds = parsed; // array of integers
+  }
+
   const isFavoriteQueryParam = req.query.isFavorite === 'true';
   const onSale = req.query.onSale === 'true';
   const keywordQuery = req.query.keyword || null; // Renamed to avoid conflict with table alias 'k'
@@ -2405,10 +2416,6 @@ app.get("/getProducts", async (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 20;
   const offset = (page - 1) * limit;
   const today = new Date().toISOString().split('T')[0];
-
-  if (isNaN(storeId) || storeId <= 0) {
-    storeId = null;
-  }
 
   // --- MODIFICATION START: Prepare for matched_keyword_count ---
   const searchKeywordsArray = keywordQuery ? keywordQuery.split(' ').map(kw => kw.trim()).filter(kw => kw.length > 1) : [];
@@ -2427,7 +2434,7 @@ app.get("/getProducts", async (req, res) => {
     `;
     searchKeywordsArray.forEach(kw => paramsForMatchedKeywordCountSubquery.push(`${kw}%`));
   }
-  // --- MODIFICATION END ---
+  // --- Modification end ---
 
   let fromAndJoins = `
     FROM
@@ -2439,7 +2446,6 @@ app.get("/getProducts", async (req, res) => {
     ${userId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}
   `;
 
-  
   // Main SELECT statement including the dynamic matched_keyword_count
   let q = `
     SELECT
@@ -2462,14 +2468,15 @@ app.get("/getProducts", async (req, res) => {
     selectParams.push(userId); // For isFavorite CASE WHEN (and the JOIN if userId is present)
   }
 
-
   // Build WHERE clause conditions and parameters
   let conditions = [];
   const whereParams = [];
 
-  if (storeId !== null) {
-    conditions.push(`p.storeId = ?`);
-    whereParams.push(storeId);
+  // If storeIds is an array use IN(...) ; otherwise no store filter
+  if (Array.isArray(storeIds) && storeIds.length > 0) {
+    const placeholders = storeIds.map(() => '?').join(',');
+    conditions.push(`p.storeId IN (${placeholders})`);
+    whereParams.push(...storeIds);
   }
 
   if (isFavoriteQueryParam && userId) {
@@ -2498,16 +2505,7 @@ app.get("/getProducts", async (req, res) => {
   // Add GROUP BY, ORDER BY, and LIMIT/OFFSET
   q += `
     GROUP BY p.productId ${matchedKeywordCountSelectSQL !== '0 AS matched_keyword_count' ? '' : ''} 
-    /* If matched_keyword_count is a subquery on p.productId, explicit grouping by it might not be needed, 
-       but p.productId needs to be the primary grouping key. The DB might optimize.
-       For safety, ensure all non-aggregated SELECT columns (that aren't functionally dependent on p.productId)
-       would be included if not for the subquery. Here, the subquery IS dependent on p.productId.
-
-       ORDER BY matched_keyword_count DESC,  productOnSale DESC , categoryWeight DESC, p.productId DESC
-    */
-    
     ORDER BY matched_keyword_count DESC,  productOnSale DESC , categoryWeight DESC, p.productId DESC
-    
     LIMIT ? OFFSET ?
   `;
 
@@ -2523,26 +2521,7 @@ app.get("/getProducts", async (req, res) => {
     return res.status(500).json({ error: "Failed to retrieve products" });
   }
 });
-
-// --- MODIFIED: /getProducts endpoint ---
-
-
-// add api endpoint to get distinc postId from products table
-app.get("/getPostIds", (req, res) => {
-  const q = `SELECT DISTINCT postId FROM products WHERE postId IS NOT NULL`;
-  db.query(q, (err, data
-) => {
-    if (err) {
-      console.log("getDistinctPostIds error:", err);
-      return res.json(err);
-    }
-    return res.json(data);
-  });
-});
-
-
-
-
+// ...existing code...
 
 app.get("/getProductsDashboard", async (req, res) => {
   const userId = parseInt(req.query.userId, 10) || null;
