@@ -17,7 +17,7 @@ dist-ssr
 # ignore persistent folder and everything in it
 persistent/
 
-
+connection.js
 
 
 # Editor directories and files
