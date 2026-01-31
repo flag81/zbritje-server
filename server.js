@@ -349,19 +349,16 @@ app.post("/auth/apple/callback", async (req, res) => {
 
 
 
-
-
-
 // Specify the model you want to use (e.g., Gemini 1.5 Pro)
 //const model = 'gemini-2.5-pro'; // Updated to Gemini 2.5 Pro
 
-const model = 'gemini-1.5-flash-8b';
+const model = 'gemini-1.5-flash';
 
 // Access the generative model
 const generativeModel = vertexAI.getGenerativeModel({
     model: model,
     generation_config: {
-        temperature: 0.2,
+        temperature: 0.1,
         topP: 0.8,
         topK: 40,
         maxOutputTokens: 4096 // Increased max output tokens for potentially larger JSON
