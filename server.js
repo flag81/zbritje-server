@@ -88,7 +88,7 @@ import { VertexAI } from '@google-cloud/vertexai';
 
 const vertexAI = new VertexAI({
   project: 'vision-ai-455010', 
-  location: 'europe-west3',
+  location: 'europe-west4',
   keyFilename: keyFilePath, // Path to your service account key file
 
 }); // Replace with your project and location
