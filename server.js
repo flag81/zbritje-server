@@ -352,7 +352,7 @@ app.post("/auth/apple/callback", async (req, res) => {
 // Specify the model you want to use (e.g., Gemini 1.5 Pro)
 //const model = 'gemini-2.5-pro'; // Updated to Gemini 2.5 Pro
 
-const model = 'gemini-1.5-flash-002';
+const model = 'gemini-2.0-flash-lite-001';
 
 // Access the generative model
 const generativeModel = vertexAI.getGenerativeModel({
