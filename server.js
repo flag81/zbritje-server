@@ -5,46 +5,10 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import { sendDailyProductNotifications } from './notificationScheduler.js';
 import os from 'os'; // <-- FIX: Import the 'os' module
-
-
-
-// --- START: CRITICAL CREDENTIALS DEBUGGING ---
-// This block will help us verify if the server can find and read your credentials file.
-try {
-  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (!credentialsPath) {
-    console.error('❌ FATAL: GOOGLE_APPLICATION_CREDENTIALS environment variable is NOT SET.');
-  } else {
-    console.log(`✅ GOOGLE_APPLICATION_CREDENTIALS is set to: ${credentialsPath}`);
-    if (fs.existsSync(credentialsPath)) {
-      console.log('✅ Credentials file exists at the specified path.');
-      const fileContent = fs.readFileSync(credentialsPath, 'utf8');
-      const credentials = JSON.parse(fileContent);
-      if (credentials.private_key && credentials.client_email) {
-        console.log('✅ Credentials file was read and parsed successfully. It contains the required keys.');
-      } else {
-        console.error('❌ FATAL: Credentials file is missing required keys like "private_key" or "client_email".');
-      }
-    } else {
-      console.error(`❌ FATAL: Credentials file NOT FOUND at path: ${credentialsPath}`);
-    }
-  }
-} catch (e) {
-  console.error('❌ FATAL: An error occurred during credential verification:', e);
-}
-
-// We no longer need groupTextElementsSpatially if extracting directly from image
-// import { groupTextElementsSpatially } from './utils.js';
-
-import identifyUserMiddleware from './identifyUserMiddleware.js'
-import  {queryPromise}  from './dbUtils.js';
-import { uploadFacebookPhotoToCloudinary } from './uploadFacebookPhoto.js';
-
-import { fetchFacebookPosts } from './rapidApi.js';
+import webPushPkg from 'web-push';
+const webPush = webPushPkg && webPushPkg.default ? webPushPkg.default : webPushPkg;
 
 import { Expo } from 'expo-server-sdk'; // 1. IMPORT THE SDK
-
-
 
 dotenv.config();
 
@@ -119,10 +83,12 @@ console.log('✅ Apify client initialized in server.js', process.env.APIFY_TOKEN
 
 import { format } from 'path';
 import db from './connection.js';
+import { queryPromise } from './dbUtils.js';
 
 
 import cookieParser from 'cookie-parser';
 import bodyParser from'body-parser';
+import identifyUserMiddleware from './identifyUserMiddleware.js';
 
 import AppleSigninAuth from 'apple-signin-auth';
 
@@ -135,7 +101,7 @@ export const app = express();
 
 import jwt from 'jsonwebtoken';
 
-import webPush from 'web-push';
+
 
 import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
@@ -146,6 +112,66 @@ import axios, { all } from "axios";
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Supports form data parsing
+
+// Configure VAPID for web-push (requires VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in .env)
+webPush.setVapidDetails(
+  `mailto:${process.env.VAPID_ADMIN_EMAIL || 'admin@example.com'}`,
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY
+);
+
+// Endpoint to receive push subscription objects from clients
+app.post('/subscribe-webpush', async (req, res) => {
+  try {
+    const { subscription, userId } = req.body;
+    if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
+
+    const q = `INSERT INTO subscriptions (endpoint, subscription, userId) VALUES (?, ?, ?)
+               ON DUPLICATE KEY UPDATE subscription = ?`;
+    db.query(q, [subscription.endpoint, JSON.stringify(subscription), userId || null, JSON.stringify(subscription)], (err) => {
+      if (err) {
+        console.error('DB save subscription error:', err);
+        return res.status(500).json({ error: 'DB error' });
+      }
+      res.json({ success: true });
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Trigger notifications to all stored subscriptions
+app.post('/trigger-all-user-notifications', async (req, res) => {
+  try {
+    const q = `SELECT subscription FROM subscriptions`;
+    db.query(q, async (err, results) => {
+      if (err) {
+        console.error('DB fetch subscriptions error:', err);
+        return res.status(500).json({ error: 'DB error' });
+      }
+      const payload = {
+        title: req.body.title || 'Meniven',
+        body: req.body.body || 'Notification from server',
+        icon: req.body.icon || '/icon.png',
+        url: req.body.url || process.env.FRONTEND_URL || '/'
+      };
+
+      const sendPromises = results.map(row => {
+        const sub = JSON.parse(row.subscription);
+        return webPush.sendNotification(sub, JSON.stringify(payload)).catch(e => {
+          console.error('sendNotification error:', e);
+        });
+      });
+
+      await Promise.all(sendPromises);
+      res.json({ success: true, sent: results.length });
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 
 app.use((req, res, next) => {
@@ -1026,10 +1052,6 @@ allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(i
 
 // ...existing code...
 
-
-
-
-
 async function listAllMediaFiles() {
   try {
     const result = await cloudinary.api.resources({
@@ -1151,7 +1173,6 @@ app.get('/initialize-anonymous', async (req, res) => {
 });
 
 
-// ...existing code...
 app.get('/initialize', async (req, res) => { // Added async
   console.log('🟢 Initialize endpoint hit');
 
@@ -1181,13 +1202,15 @@ app.get('/initialize', async (req, res) => { // Added async
       ON DUPLICATE KEY UPDATE userId=userId`;
     await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]);
 
-    // Set cookie for web clients
-    res.cookie('jwt', token, {
-        httpOnly: true,
-        secure: true, 
-        sameSite: 'None',
-        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
+    // Set cookie for web clients. Use secure/SameSite only in production so
+    // development over plain HTTP still receives the cookie.
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+    };
+    res.cookie('jwt', token, cookieOptions);
 
     console.log('✅ Anonymous user initialized. JWT cookie set for web. Token sent in body for mobile.');
     // Return the token in the body for the mobile app
@@ -1198,7 +1221,6 @@ app.get('/initialize', async (req, res) => { // Added async
       return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
   }
 });
-// ...existing code...
 
 
 app.get('/initialize2', (req, res) => {
@@ -1768,7 +1790,6 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 
 // ...existing code...
 
-
 // **UPDATED** formatDataToJson function to work with image URL
  
 
@@ -1909,8 +1930,6 @@ app.post('/register-push-token', identifyUserMiddleware, async (req, res) => {
 });
 
 // ...existing code...
-
-
 
 app.get('/user/preferences', async (req, res) => {
   if (!req.identifiedUser?.userId) {
