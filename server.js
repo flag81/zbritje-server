@@ -84,6 +84,7 @@ console.log('✅ Apify client initialized in server.js', process.env.APIFY_TOKEN
 import { format } from 'path';
 import db from './connection.js';
 import { queryPromise } from './dbUtils.js';
+import { fetchFacebookPosts } from './rapidApi.js';
 
 
 import cookieParser from 'cookie-parser';
