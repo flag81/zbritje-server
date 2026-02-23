@@ -112,6 +112,9 @@ import axios, { all } from "axios";
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Supports form data parsing
+// Apply a permissive CORS policy early so routes defined above also receive CORS headers
+// This ensures endpoints like /subscribe-webpush (defined earlier) are accessible from the frontend
+app.use(cors({ origin: true, credentials: true }));
 
 // Configure VAPID for web-push (requires VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in .env)
 webPush.setVapidDetails(
@@ -125,6 +128,8 @@ app.post('/subscribe-webpush', async (req, res) => {
   try {
     const { subscription, userId } = req.body;
     if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
+
+
 
     const q = `INSERT INTO subscriptions (endpoint, subscription, userId) VALUES (?, ?, ?)
                ON DUPLICATE KEY UPDATE subscription = ?`;
@@ -140,6 +145,7 @@ app.post('/subscribe-webpush', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 // Trigger notifications to all stored subscriptions
 app.post('/trigger-all-user-notifications', async (req, res) => {
