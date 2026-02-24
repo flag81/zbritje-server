@@ -413,6 +413,7 @@ const corsOptions = {
     'http://localhost:8080', // Allow local development
     'http://192.168.1.5:8081', 
     'https://www.meniven.com',
+    'https://api.meniven.com',
     'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
     'https://singular-catfish-deciding.ngrok-free.app',
     // This regex allows any IP on the 192.168.1.x subnet with any port
