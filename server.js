@@ -113,9 +113,46 @@ import axios, { all } from "axios";
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Supports form data parsing
-// Apply a permissive CORS policy early so routes defined above also receive CORS headers
-// This ensures endpoints like /subscribe-webpush (defined earlier) are accessible from the frontend
-app.use(cors({ origin: true, credentials: true }));
+// --- CORS (single source of truth, applied early) ---
+// The frontend (https://www.meniven.com) calls the API (https://api.meniven.com) with cookies.
+// With credentials enabled we must NOT use '*', so we reflect only allowed origins.
+const corsAllowList = new Set(
+  [
+    process.env.FRONTEND_URL,
+    process.env.FRONTEND_URL2,
+    'https://www.meniven.com',
+    'https://api.meniven.com',
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://localhost:8081',
+    'https://singular-catfish-deciding.ngrok-free.app',
+    'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
+  ].filter(Boolean)
+);
+
+const localSubnetRegex = /^http:\/\/192\.168\.1\.\d{1,3}(:\d+)?$/;
+
+const corsDelegate = (req, callback) => {
+  const requestOrigin = req.header('Origin');
+
+  // Non-browser/server-to-server requests don't need CORS headers.
+  if (!requestOrigin) return callback(null, { origin: false });
+
+  const isAllowed = corsAllowList.has(requestOrigin) || localSubnetRegex.test(requestOrigin);
+  if (!isAllowed) return callback(null, { origin: false });
+
+  return callback(null, {
+    origin: requestOrigin,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    optionsSuccessStatus: 204,
+  });
+};
+
+app.use(cors(corsDelegate));
+app.options('*', cors(corsDelegate));
 
 // Configure VAPID for web-push (requires VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in .env)
 webPush.setVapidDetails(
@@ -400,35 +437,7 @@ const generativeModel = vertexAI.getGenerativeModel({
 
 
 
-// Apple Callback Route (keeping this)
-const corsOptions = {
-  origin: [process.env.FRONTEND_URL, process.env.FRONTEND_URL2,
-    'http://localhost:5173',
-    'http://192.168.1.2:5173', // Allow local network IPs
-    'http://192.168.1.5:3000', // Add your server's local IP
-    // how to  allow local network IPs in CORS?
-    'http://192.168.1.x', // Allow all local network IPs
-    'http://localhost:3000', // Allow local development
-    'http://localhost:8081', // Allow local development
-    'http://localhost:8080', // Allow local development
-    'http://192.168.1.5:8081', 
-    'https://www.meniven.com',
-    'https://api.meniven.com',
-    'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
-    'https://singular-catfish-deciding.ngrok-free.app',
-    // This regex allows any IP on the 192.168.1.x subnet with any port
-    /^http:\/\/192\.168\.1\.\d{1,3}(:\d+)?$/ 
-  ] , // Replace with your frontend's origin
-  credentials: true,
-  origin: true,
-  sameSite: 'none', 
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-};
-
-console.log('corsOptions:', corsOptions);
-
-app.use(cors(corsOptions));
+// CORS is configured once near app initialization.
 app.use(cookieParser());
 app.use(bodyParser.json());
 
@@ -536,35 +545,33 @@ app.get('/facebook-posts', async (req, res) => {
 
     // Return both the flat array and the grouped posts for debugging
     res.json({
-      items,
-      posts, // grouped by post for debugging
-      debugMessages
-    });
-  } catch (err) {
-    debugMessages.push(`❌ [facebook-posts] API error: ${err?.message || err}`);
-    console.error('❌ [facebook-posts] API error:', err);
-    res.status(500).json({ error: err.message, debugMessages });
-  }
-});
-
-// ...existing code...
-
-// --- MODIFIED: Manually trigger scheduled notification logic for ALL users ---
-// This endpoint now ignores any userId in the body and runs the full notification job.
-
-// --- NEW: Manually trigger scheduled notification logic for a single user ---
-app.post('/trigger-user-notifications', async (req, res) => {
-  const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID is required.' });
-  }
-
-  console.log(`[Manual Trigger] Received request for user: ${userId}`);
-
-  try {
+      process.env.FRONTEND_URL,
+      process.env.FRONTEND_URL2,
+      'http://localhost:5173',
+      'http://192.168.1.2:5173', // Allow local network IPs
+      'http://192.168.1.5:3000', // Add your server's local IP
+      'http://192.168.1.x', // Allow all local network IPs
+      'http://localhost:3000', // Allow local development
+      'http://localhost:8081', // Allow local development
+      'http://localhost:8080', // Allow local development
+      'http://192.168.1.5:8081',
+      'https://www.meniven.com',
+      'https://api.meniven.com',
+      'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
+      'https://singular-catfish-deciding.ngrok-free.app',
+      // This regex allows any IP on the 192.168.1.x subnet with any port
+      /^http:\/\/192\.168\.1\.\d{1,3}(:\d+)?$/
+    ], // Replace with your frontend's origin
+    credentials: true,
+    origin: true,
+    sameSite: 'none', 
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  };
     // 1. Get matching on-sale products for the user based on favorite keywords
+  console.log('corsOptions:', corsOptions);
     const matchingProductsQuery = `
+  app.use(cors(corsOptions));
       WITH UserFavoriteKeywords AS (
         SELECT DISTINCT k.keyword
         FROM favorites f
