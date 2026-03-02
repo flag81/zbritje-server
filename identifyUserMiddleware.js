@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { queryPromise } from './dbUtils.js';
 
 const identifyUserMiddleware = async (req, res, next) => {
+  const reqTag = `${req.method} ${req.originalUrl}`;
   let token = null;
   let source = 'none';
 
@@ -9,13 +10,13 @@ const identifyUserMiddleware = async (req, res, next) => {
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     token = req.headers.authorization.split(' ')[1];
     source = 'header';
-    console.log('[Middleware] Found token in Authorization header.');
+    console.log(`[Middleware] (${reqTag}) Found token in Authorization header.`);
   } 
   // 2. If not in header, check for token in cookies (for web app)
   else if (req.cookies && req.cookies.jwt) {
     token = req.cookies.jwt;
     source = 'cookie';
-    console.log('[Middleware] Found token in cookies.');
+    console.log(`[Middleware] (${reqTag}) Found token in cookies.`);
   }
 
   if (token) {
@@ -57,16 +58,16 @@ const identifyUserMiddleware = async (req, res, next) => {
       }
 
       req.identifiedUser = identifiedUser;
-      console.log(`[Middleware] User identified via ${source}: ${tokenUserId} (db id: ${identifiedUser.id ?? 'n/a'})`);
+      console.log(`[Middleware] (${reqTag}) User identified via ${source}: ${tokenUserId} (db id: ${identifiedUser.id ?? 'n/a'})`);
     } catch (err) {
       // Token is invalid or expired
       req.identifiedUser = null;
-      console.warn(`[Middleware] Invalid token from ${source}. Error: ${err.message}`);
+      console.warn(`[Middleware] (${reqTag}) Invalid token from ${source}. Error: ${err.message}`);
     }
   } else {
     // No token found
     req.identifiedUser = null;
-    console.log('[Middleware] No token found in request.');
+    console.log(`[Middleware] (${reqTag}) No token found in request.`);
   }
 
   next();

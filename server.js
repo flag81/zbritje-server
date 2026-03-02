@@ -781,16 +781,31 @@ app.post('/get-facebook-photos', async (req, res) => {
 
 // Consider removing this if /auth/check-session is sufficient and used by frontend
 app.get("/check-session", async (req, res) => {
-  console.log("🔍 Checking session...");
+  const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  console.log(`🔍 [check-session] (${reqId}) start ${req.method} ${req.originalUrl}`);
+
+  // Determine how the client is authenticating so we can suggest the right recovery.
+  const hasAuthHeader = Boolean(req.headers.authorization && req.headers.authorization.startsWith('Bearer '));
+  const hasJwtCookie = Boolean(req.cookies && req.cookies.jwt);
+  const authSource = hasAuthHeader ? 'header' : (hasJwtCookie ? 'cookie' : 'none');
 
   const tokenUserId = req.identifiedUser?.userId ?? null; // could be "anon_..."
   const numericId = req.identifiedUser?.id ?? (
     typeof tokenUserId === 'string' && /^\d+$/.test(tokenUserId) ? parseInt(tokenUserId, 10) : null
   );
 
+  console.log(`🔍 [check-session] (${reqId}) authSource=${authSource} hasHeader=${hasAuthHeader} hasCookie=${hasJwtCookie} tokenUserId=${tokenUserId ?? 'null'} numericId=${numericId ?? 'null'}`);
+
   if (!tokenUserId && !numericId) {
-    console.log("⚠️ No valid token found in /check-session.");
-    return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+    console.log(`⚠️ [check-session] (${reqId}) no valid token found.`);
+    return res.json({
+      isLoggedIn: false,
+      isRegistered: false,
+      userId: null,
+      email: null,
+      shouldReinitialize: false,
+      reason: 'NO_TOKEN',
+    });
   }
 
   try {
@@ -802,21 +817,47 @@ app.get("/check-session", async (req, res) => {
     const results = await queryPromise(q, [numericId ?? tokenUserId]);
 
     if (!results || results.length === 0) {
-      console.warn(`⚠️ Token user not found in DB during check-session. tokenUserId=${tokenUserId} numericId=${numericId}`);
-      // Don't aggressively clear cookies here unless you're sure the token is invalid.
-      return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+      console.warn(`⚠️ [check-session] (${reqId}) token user not found in DB. tokenUserId=${tokenUserId} numericId=${numericId} authSource=${authSource}`);
+
+      // If auth came from a cookie, clearing it can help the browser recover.
+      // If auth came from Authorization header, the client must clear localStorage token.
+      if (authSource === 'cookie') {
+        res.clearCookie('jwt');
+      }
+
+      return res.json({
+        isLoggedIn: false,
+        isRegistered: false,
+        userId: null,
+        email: null,
+        shouldReinitialize: true,
+        reason: 'USER_NOT_FOUND',
+        authSource,
+      });
     }
 
     const user = results[0];
+    console.log(`✅ [check-session] (${reqId}) ok userId=${user.id} is_registered=${user.is_registered} authSource=${authSource}`);
     return res.json({
       isLoggedIn: true,
       isRegistered: !!user.is_registered,
       userId: user.id,
       email: user.email ?? null,
+      shouldReinitialize: false,
+      reason: null,
+      authSource,
     });
   } catch (err) {
     console.error("❌ DB error during /check-session:", err);
-    return res.status(500).json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+    return res.status(500).json({
+      isLoggedIn: false,
+      isRegistered: false,
+      userId: null,
+      email: null,
+      shouldReinitialize: false,
+      reason: 'DB_ERROR',
+      authSource,
+    });
   }
 });
 
@@ -1201,12 +1242,27 @@ app.get('/initialize-anonymous', async (req, res) => {
 
 // ...existing code...
 app.get('/initialize', async (req, res) => { // Added async
-  console.log('🟢 Initialize endpoint hit');
+  const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const redactToken = (t) => {
+    if (!t || typeof t !== 'string') return null;
+    if (t.length <= 18) return '***';
+    return `${t.slice(0, 10)}…${t.slice(-6)}`;
+  };
+
+  console.log(`🟢 [initialize] (${reqId}) hit ${req.method} ${req.originalUrl}`);
+  console.log(`🟢 [initialize] (${reqId}) origin=${req.headers.origin || 'n/a'} ip=${req.ip} ua=${req.headers['user-agent'] || 'n/a'}`);
+
+  const headerToken = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.split(' ')[1]
+    : null;
+  const cookieToken = req.cookies?.jwt || null;
+
+  console.log(`🟢 [initialize] (${reqId}) token sources: header=${Boolean(headerToken)} cookie=${Boolean(cookieToken)} identifiedUser=${req.identifiedUser ? JSON.stringify(req.identifiedUser) : 'null'}`);
 
   // Check if user is already identified by the middleware
   if (req.identifiedUser && req.identifiedUser.userId) {
     const tokenUserId = req.identifiedUser.userId;
-    console.log('✅ User already identified:', tokenUserId);
+    console.log(`✅ [initialize] (${reqId}) user already identified: userId=${tokenUserId} dbId=${req.identifiedUser.id ?? 'n/a'}`);
 
     // ✅ Ensure anon_* users always have a DB row (prevents check-session "user not found" loops)
     try {
@@ -1231,12 +1287,54 @@ app.get('/initialize', async (req, res) => { // Added async
       // Don't hard-fail init; we still return the token so client can retry /check-session.
     }
 
-    // Also send the token in the body for mobile clients that might need it
-    const token = req.headers.authorization?.split(' ')[1] || req.cookies.jwt;
+    // Also send the token in the body for mobile clients that might need it.
+    const token = headerToken || cookieToken;
+    console.log(`✅ [initialize] (${reqId}) returning identified user. token=${redactToken(token)}`);
     return res.json({ message: 'User identified', userId: tokenUserId, token });
   }
 
-  // ...existing code...
+  // No valid identified user -> create a new anonymous user + token.
+  console.log(`⚠️ [initialize] (${reqId}) no valid user identified. Generating new anonymous user.`);
+
+  if (!process.env.TOKEN_SECRET) {
+    console.error(`❌ [initialize] (${reqId}) TOKEN_SECRET is not set; cannot sign JWT.`);
+    return res.status(500).json({ message: 'Server misconfigured: TOKEN_SECRET missing.' });
+  }
+
+  const anonymousUserId = `anon_${Date.now()}`;
+  const tokenPayload = { userId: anonymousUserId };
+  const token = jwt.sign(tokenPayload, process.env.TOKEN_SECRET, { expiresIn: '30d' });
+
+  console.log(`🟡 [initialize] (${reqId}) generated anonymous userId=${anonymousUserId} jwt=${redactToken(token)}`);
+
+  try {
+    // Insert placeholder for anonymous user
+    const insertQuery = `
+      INSERT INTO users (userId, first_name, is_registered)
+      VALUES (?, ?, ?)
+      ON DUPLICATE KEY UPDATE userId=userId`;
+
+    const insertResult = await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]);
+    console.log(`🟡 [initialize] (${reqId}) DB user upsert ok. result=${JSON.stringify(insertResult)}`);
+
+    // Set cookie for web clients. Use secure/SameSite only in production so
+    // development over plain HTTP still receives the cookie.
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+    };
+
+    res.cookie('jwt', token, cookieOptions);
+    console.log(`✅ [initialize] (${reqId}) anonymous user initialized. Set-Cookie jwt; options=${JSON.stringify(cookieOptions)}`);
+
+    // Return token in body for mobile/cross-site header fallback
+    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId, token });
+  } catch (err) {
+    console.error(`❌ [initialize] (${reqId}) failed to insert anonymous user into DB:`, err);
+    return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
+  }
 });
 // ...existing code...
 
