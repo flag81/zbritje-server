@@ -783,11 +783,6 @@ app.post('/get-facebook-photos', async (req, res) => {
 app.get("/check-session", async (req, res) => {
   console.log("🔍 Checking session...");
 
-  // Determine how the client is authenticating so we can suggest the right recovery.
-  const hasAuthHeader = Boolean(req.headers.authorization && req.headers.authorization.startsWith('Bearer '));
-  const hasJwtCookie = Boolean(req.cookies && req.cookies.jwt);
-  const authSource = hasAuthHeader ? 'header' : (hasJwtCookie ? 'cookie' : 'none');
-
   const tokenUserId = req.identifiedUser?.userId ?? null; // could be "anon_..."
   const numericId = req.identifiedUser?.id ?? (
     typeof tokenUserId === 'string' && /^\d+$/.test(tokenUserId) ? parseInt(tokenUserId, 10) : null
@@ -795,14 +790,7 @@ app.get("/check-session", async (req, res) => {
 
   if (!tokenUserId && !numericId) {
     console.log("⚠️ No valid token found in /check-session.");
-    return res.json({
-      isLoggedIn: false,
-      isRegistered: false,
-      userId: null,
-      email: null,
-      shouldReinitialize: false,
-      reason: 'NO_TOKEN',
-    });
+    return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
   }
 
   try {
@@ -815,22 +803,8 @@ app.get("/check-session", async (req, res) => {
 
     if (!results || results.length === 0) {
       console.warn(`⚠️ Token user not found in DB during check-session. tokenUserId=${tokenUserId} numericId=${numericId}`);
-
-      // If auth came from a cookie, clearing it can help the browser recover.
-      // If auth came from Authorization header, the client must clear localStorage token.
-      if (authSource === 'cookie') {
-        res.clearCookie('jwt');
-      }
-
-      return res.json({
-        isLoggedIn: false,
-        isRegistered: false,
-        userId: null,
-        email: null,
-        shouldReinitialize: true,
-        reason: 'USER_NOT_FOUND',
-        authSource,
-      });
+      // Don't aggressively clear cookies here unless you're sure the token is invalid.
+      return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
     }
 
     const user = results[0];
@@ -839,21 +813,10 @@ app.get("/check-session", async (req, res) => {
       isRegistered: !!user.is_registered,
       userId: user.id,
       email: user.email ?? null,
-      shouldReinitialize: false,
-      reason: null,
-      authSource,
     });
   } catch (err) {
     console.error("❌ DB error during /check-session:", err);
-    return res.status(500).json({
-      isLoggedIn: false,
-      isRegistered: false,
-      userId: null,
-      email: null,
-      shouldReinitialize: false,
-      reason: 'DB_ERROR',
-      authSource,
-    });
+    return res.status(500).json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
   }
 });
 
