@@ -116,6 +116,13 @@ app.use(express.urlencoded({ extended: true })); // Supports form data parsing
 // --- CORS (single source of truth, applied early) ---
 // The frontend (https://www.meniven.com) calls the API (https://api.meniven.com) with cookies.
 // With credentials enabled we must NOT use '*', so we reflect only allowed origins.
+const corsDebug = process.env.CORS_DEBUG === 'true';
+
+const normalizeOrigin = (value) => {
+  if (typeof value !== 'string') return value;
+  return value.replace(/\/+$/, '');
+};
+
 const corsAllowList = new Set(
   [
     process.env.FRONTEND_URL,
@@ -128,19 +135,27 @@ const corsAllowList = new Set(
     'http://localhost:8081',
     'https://singular-catfish-deciding.ngrok-free.app',
     'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
-  ].filter(Boolean)
+  ].map(normalizeOrigin).filter(Boolean)
 );
 
 const localSubnetRegex = /^http:\/\/192\.168\.1\.\d{1,3}(:\d+)?$/;
 
 const corsDelegate = (req, callback) => {
-  const requestOrigin = req.header('Origin');
+  const requestOrigin = normalizeOrigin(req.header('Origin'));
 
   // Non-browser/server-to-server requests don't need CORS headers.
-  if (!requestOrigin) return callback(null, { origin: false });
+  if (!requestOrigin) {
+    if (corsDebug) console.log('[CORS] No Origin header:', req.method, req.originalUrl);
+    return callback(null, { origin: false });
+  }
 
   const isAllowed = corsAllowList.has(requestOrigin) || localSubnetRegex.test(requestOrigin);
-  if (!isAllowed) return callback(null, { origin: false });
+  if (!isAllowed) {
+    if (corsDebug) console.warn('[CORS] Blocked origin:', requestOrigin, req.method, req.originalUrl);
+    return callback(null, { origin: false });
+  }
+
+  if (corsDebug) console.log('[CORS] Allowed origin:', requestOrigin, req.method, req.originalUrl);
 
   return callback(null, {
     origin: requestOrigin,
@@ -545,33 +560,31 @@ app.get('/facebook-posts', async (req, res) => {
 
     // Return both the flat array and the grouped posts for debugging
     res.json({
-      process.env.FRONTEND_URL,
-      process.env.FRONTEND_URL2,
-      'http://localhost:5173',
-      'http://192.168.1.2:5173', // Allow local network IPs
-      'http://192.168.1.5:3000', // Add your server's local IP
-      'http://192.168.1.x', // Allow all local network IPs
-      'http://localhost:3000', // Allow local development
-      'http://localhost:8081', // Allow local development
-      'http://localhost:8080', // Allow local development
-      'http://192.168.1.5:8081',
-      'https://www.meniven.com',
-      'https://api.meniven.com',
-      'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
-      'https://singular-catfish-deciding.ngrok-free.app',
-      // This regex allows any IP on the 192.168.1.x subnet with any port
-      /^http:\/\/192\.168\.1\.\d{1,3}(:\d+)?$/
-    ], // Replace with your frontend's origin
-    credentials: true,
-    origin: true,
-    sameSite: 'none', 
-    methods: ["GET", "POST", "PUT", "DELETE"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  };
+      items,
+      posts,
+      debugMessages,
+    });
+  } catch (err) {
+    debugMessages.push(`❌ [facebook-posts] API error: ${err?.message || err}`);
+    console.error('❌ [facebook-posts] API error:', err);
+    res.status(500).json({ error: err.message, debugMessages });
+  }
+});
+
+
+// --- NEW: Manually trigger scheduled notification logic for a single user ---
+app.post('/trigger-user-notifications', async (req, res) => {
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required.' });
+  }
+
+  console.log(`[Manual Trigger] Received request for user: ${userId}`);
+
+  try {
     // 1. Get matching on-sale products for the user based on favorite keywords
-  console.log('corsOptions:', corsOptions);
     const matchingProductsQuery = `
-  app.use(cors(corsOptions));
       WITH UserFavoriteKeywords AS (
         SELECT DISTINCT k.keyword
         FROM favorites f
@@ -609,7 +622,7 @@ app.get('/facebook-posts', async (req, res) => {
     const productIds = matchingProducts.map(p => p.productId);
     const productCount = productIds.length;
     const body = `Ju keni ${productCount} produkte në ofertë që përputhen me preferencat tuaja.`;
-    
+
     const messages = [];
     for (const pushToken of tokens) {
       if (!Expo.isExpoPushToken(pushToken)) continue;
@@ -617,30 +630,28 @@ app.get('/facebook-posts', async (req, res) => {
         to: pushToken,
         sound: 'default',
         title: '✨ Oferta të Përshtatura për Ju!',
-        body: body,
-        data: { screen: 'ProductsOnSale', productIds: productIds },
+        body,
+        data: { screen: 'ProductsOnSale', productIds },
       });
     }
 
-
     if (messages.length === 0) {
-        return res.status(400).json({ message: 'Nuk u gjetën shenja të vlefshme njoftimi.' });
+      return res.status(400).json({ message: 'Nuk u gjetën shenja të vlefshme njoftimi.' });
     }
 
     const expo = new Expo({ useFcmV1: true });
     const chunks = expo.chunkPushNotifications(messages);
-    
+
     console.log(`[Manual Trigger] Sending ${messages.length} notification(s) to user ${userId}...`);
-    for (let chunk of chunks) {
-        await expo.sendPushNotificationsAsync(chunk);
+    for (const chunk of chunks) {
+      await expo.sendPushNotificationsAsync(chunk);
     }
     console.log(`[Manual Trigger] Notifications sent successfully to user ${userId}.`);
 
-    res.status(200).json({ message: `Njoftimi u dërgua me sukses për ${productCount} produkte.` });
-
+    return res.status(200).json({ message: `Njoftimi u dërgua me sukses për ${productCount} produkte.` });
   } catch (error) {
     console.error(`[Manual Trigger] Error processing request for user ${userId}:`, error);
-    res.status(500).json({ error: 'Gabim në server gjatë dërgimit të njoftimit.' });
+    return res.status(500).json({ error: 'Gabim në server gjatë dërgimit të njoftimit.' });
   }
 });
 
@@ -769,46 +780,46 @@ app.post('/get-facebook-photos', async (req, res) => {
 
 
 // Consider removing this if /auth/check-session is sufficient and used by frontend
-app.get("/check-session", async (req, res) => { // Added async
-
+app.get("/check-session", async (req, res) => {
   console.log("🔍 Checking session...");
-  
-  if (req.identifiedUser && req.identifiedUser.userId) {
-      // User identified by middleware, verify against DB
-      try {
-          // Fetch necessary details, including registration status/email
-          const query = `SELECT id, email, first_name, is_registered FROM users WHERE id = ?`;
-          const results = await queryPromise(query, [req.identifiedUser.userId]);
 
-          if (results.length === 0) {
-            console.log(`⚠️ User ${req.identifiedUser.userId} not found in DB during check-session.`);
-              console.warn(`⚠️ User ${req.identifiedUser.userId} from token not found in DB during check-session. Clearing cookie.`);
-              res.clearCookie("jwt");
-              return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
-          }
+  const tokenUserId = req.identifiedUser?.userId ?? null; // could be "anon_..."
+  const numericId = req.identifiedUser?.id ?? (
+    typeof tokenUserId === 'string' && /^\d+$/.test(tokenUserId) ? parseInt(tokenUserId, 10) : null
+  );
 
-          const user = results[0];
+  if (!tokenUserId && !numericId) {
+    console.log("⚠️ No valid token found in /check-session.");
+    return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+  }
 
-          console.log(`🔍 User found in DB: ${user.id}, Email: ${user.email || "No email"}`)  ;
+  try {
+    // If we have a numeric id, prefer it. Otherwise fallback to public userId column.
+    const q = numericId
+      ? `SELECT id, email, first_name, is_registered FROM users WHERE id = ? LIMIT 1`
+      : `SELECT id, email, first_name, is_registered FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1`;
 
-          console.log(`✅ Session check successful for userId: ${user.id}, Registered: ${user.is_registered}`);
-          return res.json({
-              isLoggedIn: true, // Means a valid ID exists
-              isRegistered: !!user.is_registered, // Check registration status
-              userId: user.id,
-              email: user.email // Will be null for anonymous users
-          });
+    const results = await queryPromise(q, [numericId ?? tokenUserId]);
 
-      } catch (err) {
-          console.error("❌ DB error during /check-session:", err);
-          return res.status(500).json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
-      }
-  } else {
-      // No valid token identified by middleware
-      console.log("⚠️ No valid token found in /check-session. Clearing cookie.");
+    if (!results || results.length === 0) {
+      console.warn(`⚠️ Token user not found in DB during check-session. tokenUserId=${tokenUserId} numericId=${numericId}`);
+      // Don't aggressively clear cookies here unless you're sure the token is invalid.
       return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+    }
+
+    const user = results[0];
+    return res.json({
+      isLoggedIn: true,
+      isRegistered: !!user.is_registered,
+      userId: user.id,
+      email: user.email ?? null,
+    });
+  } catch (err) {
+    console.error("❌ DB error during /check-session:", err);
+    return res.status(500).json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
   }
 });
+
 
 app.get('/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] }));
@@ -1893,18 +1904,25 @@ app.get("/getImagesByFlyerBookId", (req, res) => {
 
 app.get("/isFavorite", async (req, res) => { // Added async
   // Allow checking even if not identified, will just return false
-  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
-  const { productId } = req.query;
+  const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
+  const productId = parseInt(req.query.productId, 10);
 
-  if (!userId || !productId) {
+  // If userId isn't numeric here, the live DB may treat favorites.userId as numeric and error.
+  const numericUserId =
+    typeof userId === 'number'
+      ? userId
+      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
+
+  if (!numericUserId || !Number.isFinite(productId) || productId <= 0) {
      // Cannot check favorite without user and product ID
      // Technically could check productId only, but usually it's user-specific
      return res.status(200).json({ isFavorite: false }); // Return false if no user or product ID
   }
 
-  const q = `SELECT favoriteId FROM favorites WHERE userId = ? AND productId = ?`;
+  // Schema-agnostic: favorites table may not have a favoriteId column.
+  const q = `SELECT 1 FROM favorites WHERE userId = ? AND productId = ? LIMIT 1`;
   try {
-      const result = await queryPromise(q, [userId, productId]);
+      const result = await queryPromise(q, [numericUserId, productId]);
       const isFavorite = result.length > 0;
       res.status(200).json({ isFavorite });
   } catch (err) {
@@ -2169,20 +2187,69 @@ app.post("/addFavorite", async (req, res) => { // Added async
     return res.status(401).json({ error: 'User identification required.' });
   }
 
-  const { userId } = req.identifiedUser;
-  const { productId } = req.body;
+  const tokenUserId = req.identifiedUser?.userId ?? null;
+  const userId = req.identifiedUser?.id ?? tokenUserId ?? null;
+  const productId = parseInt(req.body?.productId, 10);
 
-  console.log(`[API] Adding favorite for User ID: ${userId} and Product ID: ${productId}`);
+  console.log(`[API] Adding favorite for User: tokenUserId=${tokenUserId} resolvedId=${req.identifiedUser?.id} productId=${req.body?.productId}`);
 
-  if (!productId) {
-     return res.status(400).json({ error: 'Product ID is required.' });
+  let numericUserId =
+    typeof userId === 'number'
+      ? userId
+      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
+
+  // If we only have a public token userId (e.g. anon_...), resolve/create a DB user row so
+  // favorites can consistently use the numeric users.id (common schema in this project).
+  if (!numericUserId && typeof tokenUserId === 'string' && tokenUserId.trim() !== '') {
+    try {
+      const existing = await queryPromise(
+        'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
+        [tokenUserId]
+      );
+
+      if (Array.isArray(existing) && existing[0]?.id) {
+        numericUserId = existing[0].id;
+      } else {
+        // Best-effort create; users.userId is not guaranteed unique, so we re-select after insert.
+        await queryPromise(
+          'INSERT INTO users (userId, first_name, is_registered) VALUES (?, ?, ?)',
+          [tokenUserId, `guest_${tokenUserId}`, false]
+        );
+        const created = await queryPromise(
+          'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
+          [tokenUserId]
+        );
+        if (Array.isArray(created) && created[0]?.id) {
+          numericUserId = created[0].id;
+        }
+      }
+    } catch (resolveErr) {
+      console.error('[API] Failed to resolve/create numeric user id for favorites:', resolveErr);
+    }
   }
 
-  const q = `INSERT IGNORE INTO favorites (userId, productId) VALUES (?, ?)`; // Use INSERT IGNORE
+  if (!numericUserId) {
+    return res.status(401).json({ error: 'User identification required (could not resolve numeric user id).' });
+  }
+
+  if (!Number.isFinite(productId) || productId <= 0) {
+    return res.status(400).json({ error: 'Valid Product ID is required.' });
+  }
+
+  // Idempotent insert even if there's no unique constraint on (userId, productId)
+  const q = `
+    INSERT INTO favorites (userId, productId)
+    SELECT ?, ?
+    WHERE NOT EXISTS (
+      SELECT 1 FROM favorites WHERE userId = ? AND productId = ?
+    )
+  `;
 
   try {
-      await queryPromise(q, [userId, productId]);
-      res.status(200).json({ message: 'Favorite added successfully (or already existed)' });
+      const result = await queryPromise(q, [numericUserId, productId, numericUserId, productId]);
+      const added = Boolean(result?.affectedRows);
+      console.log(`[API] Favorite ${added ? 'added' : 'already existed'} for User ID: ${numericUserId} and Product ID: ${productId}. DB result:`, result);
+      res.status(200).json({ message: added ? 'Favorite added successfully' : 'Favorite already exists', added });
   } catch (err) {
        console.error('Error adding favorite:', err);
        return res.status(500).json({ error: 'Failed to add favorite' });
@@ -2193,21 +2260,29 @@ app.delete("/removeFavorite", async (req, res) => { // Added async
   if (!req.identifiedUser || !req.identifiedUser.userId) {
     return res.status(401).json({ error: 'User identification required to remove favorites.' });
   }
-  const { userId } = req.identifiedUser;
+  const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
+  const numericUserId =
+    typeof userId === 'number'
+      ? userId
+      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
 
   console.log(`[API] Removing favorite for User ID: ${userId}`);
 
   // Get productId from request body OR query parameters
-  const productId = req.body.productId || req.query.productId;
+  const productId = parseInt(req.body?.productId ?? req.query.productId, 10);
 
-   if (!productId) {
-     return res.status(400).json({ error: 'Product ID is required.' });
+  if (!numericUserId) {
+    return res.status(401).json({ error: 'User identification required to remove favorites.' });
+  }
+
+  if (!Number.isFinite(productId) || productId <= 0) {
+    return res.status(400).json({ error: 'Valid Product ID is required.' });
   }
 
   const q = `DELETE FROM favorites WHERE userId = ? AND productId = ?`;
   try {
-      await queryPromise(q, [userId, productId]);
-      console.log(`[API] Favorite removed for User ID: ${userId} and Product ID: ${productId}`);
+      await queryPromise(q, [numericUserId, productId]);
+      console.log(`[API] Favorite removed for User ID: ${numericUserId} and Product ID: ${productId}`);
       res.status(200).json({ message: 'Favorite removed successfully' });
   } catch (err) {
        console.error('Error removing favorite:', err);
@@ -2429,7 +2504,11 @@ LIMIT 100
 
 app.get("/getProducts", async (req, res) => {
   console.log('getProducts endpoint hit');
-  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
+  const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
+  const numericUserId =
+    typeof userId === 'number'
+      ? userId
+      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
 
   // Support single storeId OR comma-separated list of storeIds (client may send CSV)
   const storeIdsParam = req.query.storeId || req.query.storeIds || "";
@@ -2476,7 +2555,7 @@ app.get("/getProducts", async (req, res) => {
     LEFT JOIN productkeywords pk ON p.productId = pk.productId
     LEFT JOIN productcategories pc ON p.category_id = pc.categoryId
     LEFT JOIN keywords k ON pk.keywordId = k.keywordId
-    ${userId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}
+    ${numericUserId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}
   `;
 
   // Main SELECT statement including the dynamic matched_keyword_count
@@ -2488,7 +2567,7 @@ app.get("/getProducts", async (req, res) => {
       ANY_VALUE(pc.categoryWeight) AS categoryWeight,
       GROUP_CONCAT(DISTINCT k.keyword SEPARATOR ',') AS keywords,
       ${matchedKeywordCountSelectSQL},
-      ${userId ? 'CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END' : 'FALSE'} AS isFavorite,
+      ${numericUserId ? 'CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END' : 'FALSE'} AS isFavorite,
       CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale
     ${fromAndJoins}
   `;
@@ -2497,8 +2576,8 @@ app.get("/getProducts", async (req, res) => {
   const selectParams = [];
   selectParams.push(...paramsForMatchedKeywordCountSubquery); // Params for the subquery
   selectParams.push(today); // For productOnSale CASE WHEN
-  if (userId) {
-    selectParams.push(userId); // For isFavorite CASE WHEN (and the JOIN if userId is present)
+  if (numericUserId) {
+    selectParams.push(numericUserId); // For isFavorite CASE WHEN (and the JOIN if numericUserId is present)
   }
 
   // Build WHERE clause conditions and parameters
@@ -2512,9 +2591,9 @@ app.get("/getProducts", async (req, res) => {
     whereParams.push(...storeIds);
   }
 
-  if (isFavoriteQueryParam && userId) {
+  if (isFavoriteQueryParam && numericUserId) {
     conditions.push(`EXISTS (SELECT 1 FROM favorites fav_sub WHERE fav_sub.productId = p.productId AND fav_sub.userId = ?)`);
-    whereParams.push(userId); // This userId is for the EXISTS subquery condition
+    whereParams.push(numericUserId); // This userId is for the EXISTS subquery condition
   }
 
   if (onSale) {

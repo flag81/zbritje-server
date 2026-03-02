@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
+import { queryPromise } from './dbUtils.js';
 
-const identifyUserMiddleware = (req, res, next) => {
+const identifyUserMiddleware = async (req, res, next) => {
   let token = null;
   let source = 'none';
 
@@ -25,9 +26,38 @@ const identifyUserMiddleware = (req, res, next) => {
         return next();
       }
       const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-      // Attach user info to the request object
-      req.identifiedUser = { userId: decoded.userId };
-      console.log(`[Middleware] User identified via ${source}: ${decoded.userId}`);
+      const tokenUserId = decoded.userId;
+
+      // Attach token user identifier to the request object.
+      // NOTE: tokenUserId may be a numeric DB id OR a string like "anon_...".
+      const identifiedUser = { userId: tokenUserId };
+
+      // Best-effort: resolve numeric `users.id` so API endpoints can use a consistent key.
+      try {
+        if (typeof tokenUserId === 'number' && Number.isFinite(tokenUserId)) {
+          identifiedUser.id = tokenUserId;
+        } else if (typeof tokenUserId === 'string') {
+          // If the token value is numeric-like, treat it as an id.
+          if (/^\d+$/.test(tokenUserId)) {
+            identifiedUser.id = parseInt(tokenUserId, 10);
+          } else {
+            // Otherwise, look up the user by the public userId (e.g. anon_...)
+            const rows = await queryPromise(
+              'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
+              [tokenUserId]
+            );
+            if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) {
+              identifiedUser.id = rows[0].id;
+            }
+          }
+        }
+      } catch (lookupErr) {
+        // Don't block the request if DB lookup fails; keep token-based identity.
+        console.warn(`[Middleware] Failed to resolve DB user id for token userId '${tokenUserId}': ${lookupErr.message}`);
+      }
+
+      req.identifiedUser = identifiedUser;
+      console.log(`[Middleware] User identified via ${source}: ${tokenUserId} (db id: ${identifiedUser.id ?? 'n/a'})`);
     } catch (err) {
       // Token is invalid or expired
       req.identifiedUser = null;
