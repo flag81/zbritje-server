@@ -29,6 +29,8 @@ const identifyUserMiddleware = async (req, res, next) => {
       const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
       const tokenUserId = decoded.userId;
 
+      console.log(`[Middleware] (${reqTag}) Decoded token userId=${tokenUserId}`);
+
       // Attach token user identifier to the request object.
       // NOTE: tokenUserId may be a numeric DB id OR a string like "anon_...".
       const identifiedUser = { userId: tokenUserId };
@@ -37,10 +39,12 @@ const identifyUserMiddleware = async (req, res, next) => {
       try {
         if (typeof tokenUserId === 'number' && Number.isFinite(tokenUserId)) {
           identifiedUser.id = tokenUserId;
+          console.log(`[Middleware] (${reqTag}) Using numeric token userId as db id: ${identifiedUser.id}`);
         } else if (typeof tokenUserId === 'string') {
           // If the token value is numeric-like, treat it as an id.
           if (/^\d+$/.test(tokenUserId)) {
             identifiedUser.id = parseInt(tokenUserId, 10);
+            console.log(`[Middleware] (${reqTag}) Parsed numeric-like token userId to db id: ${identifiedUser.id}`);
           } else {
             // Otherwise, look up the user by the public userId (e.g. anon_...)
             const rows = await queryPromise(
@@ -49,6 +53,9 @@ const identifyUserMiddleware = async (req, res, next) => {
             );
             if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) {
               identifiedUser.id = rows[0].id;
+              console.log(`[Middleware] (${reqTag}) Resolved db id ${identifiedUser.id} for token userId ${tokenUserId}`);
+            } else {
+              console.warn(`[Middleware] (${reqTag}) No DB row found for token userId ${tokenUserId}`);
             }
           }
         }

@@ -1272,14 +1272,17 @@ app.get('/initialize', async (req, res) => { // Added async
           [tokenUserId]
         );
 
-        if (!Array.isArray(existing) || !existing[0]?.id) {
+        if (Array.isArray(existing) && existing[0]?.id) {
+          console.log(`✅ [initialize] (${reqId}) anon user exists in DB: userId=${tokenUserId} id=${existing[0].id}`);
+        } else {
           console.warn(`⚠️ Identified anon user ${tokenUserId} not found in DB during /initialize. Creating...`);
-          await queryPromise(
+          const insertResult = await queryPromise(
             `INSERT INTO users (userId, first_name, is_registered)
              VALUES (?, ?, ?)
              ON DUPLICATE KEY UPDATE userId = userId`,
             [tokenUserId, `guest_${tokenUserId}`, false]
           );
+          console.log(`🟡 [initialize] (${reqId}) created missing anon user row for ${tokenUserId}. result=${JSON.stringify(insertResult)}`);
         }
       }
     } catch (e) {
