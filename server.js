@@ -819,6 +819,40 @@ app.get("/check-session", async (req, res) => {
     if (!results || results.length === 0) {
       console.warn(`⚠️ [check-session] (${reqId}) token user not found in DB. tokenUserId=${tokenUserId} numericId=${numericId} authSource=${authSource}`);
 
+      // Self-heal: if the JWT is valid and represents an anon_* identity, ensure a DB row exists.
+      // This prevents production loops where /initialize returned a token but the user row was never created.
+      if (!numericId && typeof tokenUserId === 'string' && tokenUserId.startsWith('anon_')) {
+        try {
+          const insertQuery = `
+            INSERT INTO users (userId, is_registered, timestamp)
+            VALUES (?, ?, NOW())
+            ON DUPLICATE KEY UPDATE userId=userId`;
+
+          await queryPromise(insertQuery, [tokenUserId, false]);
+
+          const repaired = await queryPromise(
+            'SELECT id, email, first_name, is_registered FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
+            [tokenUserId]
+          );
+
+          if (Array.isArray(repaired) && repaired.length > 0) {
+            const user = repaired[0];
+            console.log(`🟢 [check-session] (${reqId}) repaired missing anon user. userId=${user.id} tokenUserId=${tokenUserId}`);
+            return res.json({
+              isLoggedIn: true,
+              isRegistered: !!user.is_registered,
+              userId: user.id,
+              email: user.email ?? null,
+              shouldReinitialize: false,
+              reason: null,
+              authSource,
+            });
+          }
+        } catch (e) {
+          console.error(`❌ [check-session] (${reqId}) failed to self-heal anon user ${tokenUserId}:`, e);
+        }
+      }
+
       // If auth came from a cookie, clearing it can help the browser recover.
       // If auth came from Authorization header, the client must clear localStorage token.
       if (authSource === 'cookie') {
@@ -1180,68 +1214,7 @@ app.get('/testing', async (req, res) => {
   res.json(mediaJson);
 });
 
-app.get('/initialize0', (req, res) => {
-  console.log('🟢 Initialize endpoint hit');
-  let token = req.cookies.jwt;
-  if (!token) {
-      console.log('⚠️ No JWT found in cookies. Generating a new token.');
-      const userId = Math.random().toString(36).substring(2);
-      token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '7d' });
-      console.log('Generated JWT:', token);
-      const query = `INSERT INTO users (userToken, jwt) VALUES (?, ?)`;
-      db.query(query, [userId, token], (err) => {
-          if (err) {
-              console.error('❌ Error inserting new JWT into database:', err);
-              return res.status(500).json({ message: 'Failed to initialize user.' });
-          }
-          res.cookie('jwt', token, {
-              httpOnly: true,
-              secure: process.env.NODE_ENV === 'production',
-               maxAge: 24 * 60 * 60 * 1000, // 1 day
-          });
-          return res.json({ message: 'JWT set for new user', userId });
-      });
-  } else {
-      console.log('✅ JWT found in cookies. Verifying...');
-      try {
-          const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-          console.log('✅ Token is valid:', decoded);
-          return res.json({ message: 'User identified', userId: decoded.userId });
-      } catch (err) {
-          console.error('❌ Invalid JWT:', err.message);
-          res.clearCookie('jwt');
-          return res.status(401).json({ error: "Invalid token, please reinitialize." });
-      }
-  }
-});
-
-
-app.get('/initialize-anonymous', async (req, res) => {
-  try {
-    // Insert a new anonymous user into the database
-    // The `userId` will be auto-incremented. Other fields are nullable.
-    const [result] = await db.promise().query('INSERT INTO users () VALUES ()');
-    
-    const userId = result.insertId;
-    if (!userId) {
-      return res.status(500).json({ message: 'Failed to create anonymous user.' });
-    }
-
-    console.log(`[API] Created new anonymous user with ID: ${userId}`);
-
-    // Create a long-lived token for the anonymous user
-    const token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '2y' });
-
-    res.json({ token });
-  } catch (error) {
-    console.error('[API] Error initializing anonymous session:', error);
-    res.status(500).json({ message: 'Server error during initialization.' });
-  }
-});
-
-
-// ...existing code...
-app.get('/initialize', async (req, res) => { // Added async
+const handleInitialize = async (req, res) => {
   const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const redactToken = (t) => {
     if (!t || typeof t !== 'string') return null;
@@ -1275,18 +1248,18 @@ app.get('/initialize', async (req, res) => { // Added async
         if (Array.isArray(existing) && existing[0]?.id) {
           console.log(`✅ [initialize] (${reqId}) anon user exists in DB: userId=${tokenUserId} id=${existing[0].id}`);
         } else {
-          console.warn(`⚠️ Identified anon user ${tokenUserId} not found in DB during /initialize. Creating...`);
+          console.warn(`⚠️ [initialize] (${reqId}) identified anon user not found in DB; creating. userId=${tokenUserId}`);
           const insertResult = await queryPromise(
-            `INSERT INTO users (userId, first_name, is_registered)
-             VALUES (?, ?, ?)
+            `INSERT INTO users (userId, is_registered, timestamp)
+             VALUES (?, ?, NOW())
              ON DUPLICATE KEY UPDATE userId = userId`,
-            [tokenUserId, `guest_${tokenUserId}`, false]
+            [tokenUserId, false]
           );
-          console.log(`🟡 [initialize] (${reqId}) created missing anon user row for ${tokenUserId}. result=${JSON.stringify(insertResult)}`);
+          console.log(`🟡 [initialize] (${reqId}) created missing anon user row. result=${JSON.stringify(insertResult)}`);
         }
       }
     } catch (e) {
-      console.error('❌ Failed to ensure user exists during /initialize:', e);
+      console.error(`❌ [initialize] (${reqId}) failed to ensure user exists:`, e);
       // Don't hard-fail init; we still return the token so client can retry /check-session.
     }
 
@@ -1311,17 +1284,14 @@ app.get('/initialize', async (req, res) => { // Added async
   console.log(`🟡 [initialize] (${reqId}) generated anonymous userId=${anonymousUserId} jwt=${redactToken(token)}`);
 
   try {
-    // Insert placeholder for anonymous user
     const insertQuery = `
-      INSERT INTO users (userId, first_name, is_registered)
-      VALUES (?, ?, ?)
+      INSERT INTO users (userId, is_registered, timestamp)
+      VALUES (?, ?, NOW())
       ON DUPLICATE KEY UPDATE userId=userId`;
 
-    const insertResult = await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]);
+    const insertResult = await queryPromise(insertQuery, [anonymousUserId, false]);
     console.log(`🟡 [initialize] (${reqId}) DB user upsert ok. result=${JSON.stringify(insertResult)}`);
 
-    // Set cookie for web clients. Use secure/SameSite only in production so
-    // development over plain HTTP still receives the cookie.
     const cookieOptions = {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -1331,71 +1301,45 @@ app.get('/initialize', async (req, res) => { // Added async
 
     res.cookie('jwt', token, cookieOptions);
     console.log(`✅ [initialize] (${reqId}) anonymous user initialized. Set-Cookie jwt; options=${JSON.stringify(cookieOptions)}`);
-
-    // Return token in body for mobile/cross-site header fallback
     return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId, token });
   } catch (err) {
     console.error(`❌ [initialize] (${reqId}) failed to insert anonymous user into DB:`, err);
     return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
   }
-});
-// ...existing code...
+};
+
+// Legacy endpoints kept for compatibility; route to the same implementation.
+app.get('/initialize0', handleInitialize);
 
 
-app.get('/initialize2', (req, res) => {
-  console.log('Initialize endpoint hit');
-  let token = req.cookies.jwt;
-  if (!token) {
-    console.log('No JWT found in cookies. Generating a new token.');
-    const userId = Math.random().toString(36).substring(2);
-    token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '7d' });
-    console.log('Generated JWT:', token);
-    const query = `INSERT INTO users (userToken, jwt) VALUES (?, ?)`;
-    db.query(query, [userId, token], (err) => {
-      if (err) {
-        console.error('Error inserting new JWT into database:', err);
-        return res.status(500).json({ message: 'Failed to initialize user.' });
-      }
-      res.cookie('jwt', token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      });
-      return res.json({ message: 'JWT set for new user', userId });
-    });
-  } else {
-    const query = `SELECT * FROM users WHERE jwt = ?`;
-    db.query(query, [token], (err, results) => {
-      if (err) {
-        console.error('Error querying JWT from database:', err);
-        return res.status(500).json({ message: 'Failed to verify user.' });
-      }
-      if (results.length > 0) {
-        console.log('JWT found in database. Reusing token.');
-        const { userToken } = jwt.verify(token, SECRET_KEY);
-        const userId = results[0].userId;
-        return res.json({ message: 'User identified', userId, userToken });
-      } else {
-        console.log('JWT not found in database. Treating as a new user.');
-        const userId = Math.random().toString(36).substring(2);
-        token = generateJwtToken({ userId });
-        const insertQuery = `INSERT INTO users (userId, jwt) VALUES (?, ?)`;
-        db.query(insertQuery, [userId, token], (err) => {
-          if (err) {
-            console.error('Error inserting new JWT into database:', err);
-            return res.status(500).json({ message: 'Failed to initialize user.' });
-          }
-          res.cookie('jwt', token, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-          });
-          return res.json({ message: 'JWT set for new user', userId });
-        });
-      }
-    });
+app.get('/initialize-anonymous', async (req, res) => {
+  try {
+    // Insert a new anonymous user into the database
+    // The `userId` will be auto-incremented. Other fields are nullable.
+    const [result] = await db.promise().query('INSERT INTO users () VALUES ()');
+    
+    const userId = result.insertId;
+    if (!userId) {
+      return res.status(500).json({ message: 'Failed to create anonymous user.' });
+    }
+
+    console.log(`[API] Created new anonymous user with ID: ${userId}`);
+
+    // Create a long-lived token for the anonymous user
+    const token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '2y' });
+
+    res.json({ token });
+  } catch (error) {
+    console.error('[API] Error initializing anonymous session:', error);
+    res.status(500).json({ message: 'Server error during initialization.' });
   }
 });
+
+
+app.get('/initialize', handleInitialize);
+
+
+app.get('/initialize2', handleInitialize);
 
 
 app.post('/save-preferences',  (req, res) => {
@@ -2305,8 +2249,8 @@ app.post("/addFavorite", async (req, res) => { // Added async
       } else {
         // Best-effort create; users.userId is not guaranteed unique, so we re-select after insert.
         await queryPromise(
-          'INSERT INTO users (userId, first_name, is_registered) VALUES (?, ?, ?)',
-          [tokenUserId, `guest_${tokenUserId}`, false]
+          'INSERT INTO users (userId, is_registered, `timestamp`) VALUES (?, ?, NOW())',
+          [tokenUserId, false]
         );
         const created = await queryPromise(
           'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
