@@ -783,6 +783,11 @@ app.post('/get-facebook-photos', async (req, res) => {
 app.get("/check-session", async (req, res) => {
   console.log("🔍 Checking session...");
 
+  // Determine how the client is authenticating so we can suggest the right recovery.
+  const hasAuthHeader = Boolean(req.headers.authorization && req.headers.authorization.startsWith('Bearer '));
+  const hasJwtCookie = Boolean(req.cookies && req.cookies.jwt);
+  const authSource = hasAuthHeader ? 'header' : (hasJwtCookie ? 'cookie' : 'none');
+
   const tokenUserId = req.identifiedUser?.userId ?? null; // could be "anon_..."
   const numericId = req.identifiedUser?.id ?? (
     typeof tokenUserId === 'string' && /^\d+$/.test(tokenUserId) ? parseInt(tokenUserId, 10) : null
@@ -790,7 +795,14 @@ app.get("/check-session", async (req, res) => {
 
   if (!tokenUserId && !numericId) {
     console.log("⚠️ No valid token found in /check-session.");
-    return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+    return res.json({
+      isLoggedIn: false,
+      isRegistered: false,
+      userId: null,
+      email: null,
+      shouldReinitialize: false,
+      reason: 'NO_TOKEN',
+    });
   }
 
   try {
@@ -803,8 +815,22 @@ app.get("/check-session", async (req, res) => {
 
     if (!results || results.length === 0) {
       console.warn(`⚠️ Token user not found in DB during check-session. tokenUserId=${tokenUserId} numericId=${numericId}`);
-      // Don't aggressively clear cookies here unless you're sure the token is invalid.
-      return res.json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+
+      // If auth came from a cookie, clearing it can help the browser recover.
+      // If auth came from Authorization header, the client must clear localStorage token.
+      if (authSource === 'cookie') {
+        res.clearCookie('jwt');
+      }
+
+      return res.json({
+        isLoggedIn: false,
+        isRegistered: false,
+        userId: null,
+        email: null,
+        shouldReinitialize: true,
+        reason: 'USER_NOT_FOUND',
+        authSource,
+      });
     }
 
     const user = results[0];
@@ -813,10 +839,21 @@ app.get("/check-session", async (req, res) => {
       isRegistered: !!user.is_registered,
       userId: user.id,
       email: user.email ?? null,
+      shouldReinitialize: false,
+      reason: null,
+      authSource,
     });
   } catch (err) {
     console.error("❌ DB error during /check-session:", err);
-    return res.status(500).json({ isLoggedIn: false, isRegistered: false, userId: null, email: null });
+    return res.status(500).json({
+      isLoggedIn: false,
+      isRegistered: false,
+      userId: null,
+      email: null,
+      shouldReinitialize: false,
+      reason: 'DB_ERROR',
+      authSource,
+    });
   }
 });
 
@@ -1199,54 +1236,46 @@ app.get('/initialize-anonymous', async (req, res) => {
 });
 
 
+// ...existing code...
 app.get('/initialize', async (req, res) => { // Added async
   console.log('🟢 Initialize endpoint hit');
 
   // Check if user is already identified by the middleware
   if (req.identifiedUser && req.identifiedUser.userId) {
-    console.log('✅ User already identified:', req.identifiedUser.userId);
+    const tokenUserId = req.identifiedUser.userId;
+    console.log('✅ User already identified:', tokenUserId);
+
+    // ✅ Ensure anon_* users always have a DB row (prevents check-session "user not found" loops)
+    try {
+      if (typeof tokenUserId === 'string' && tokenUserId.startsWith('anon_')) {
+        const existing = await queryPromise(
+          'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
+          [tokenUserId]
+        );
+
+        if (!Array.isArray(existing) || !existing[0]?.id) {
+          console.warn(`⚠️ Identified anon user ${tokenUserId} not found in DB during /initialize. Creating...`);
+          await queryPromise(
+            `INSERT INTO users (userId, first_name, is_registered)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE userId = userId`,
+            [tokenUserId, `guest_${tokenUserId}`, false]
+          );
+        }
+      }
+    } catch (e) {
+      console.error('❌ Failed to ensure user exists during /initialize:', e);
+      // Don't hard-fail init; we still return the token so client can retry /check-session.
+    }
+
     // Also send the token in the body for mobile clients that might need it
     const token = req.headers.authorization?.split(' ')[1] || req.cookies.jwt;
-    return res.json({ message: 'User identified', userId: req.identifiedUser.userId, token });
+    return res.json({ message: 'User identified', userId: tokenUserId, token });
   }
 
-  // If no valid identified user, generate a new one
-  console.log('⚠️ No valid user identified. Generating new anonymous user.');
-  
-  const anonymousUserId = `anon_${Date.now()}`;
-  const tokenPayload = { userId: anonymousUserId };
-  const token = jwt.sign(tokenPayload, process.env.TOKEN_SECRET, { expiresIn: '30d' });
-
-
-  console.log('Generated Anonymous JWT:', token);
-
-  try {
-    // Insert placeholder for anonymous user
-    const insertQuery = `
-      INSERT INTO users (userId, first_name, is_registered)
-      VALUES (?, ?, ?)
-      ON DUPLICATE KEY UPDATE userId=userId`;
-    await queryPromise(insertQuery, [anonymousUserId, `guest_${anonymousUserId}`, false]);
-
-    // Set cookie for web clients. Use secure/SameSite only in production so
-    // development over plain HTTP still receives the cookie.
-    const cookieOptions = {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    };
-    res.cookie('jwt', token, cookieOptions);
-
-    console.log('✅ Anonymous user initialized. JWT cookie set for web. Token sent in body for mobile.');
-    // Return the token in the body for the mobile app
-    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId, token: token });
-
-  } catch (err) {
-      console.error('❌ Error inserting new anonymous user into database:', err);
-      return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
-  }
+  // ...existing code...
 });
+// ...existing code...
 
 
 app.get('/initialize2', (req, res) => {
