@@ -823,30 +823,26 @@ app.get("/check-session", async (req, res) => {
       // This prevents production loops where /initialize returned a token but the user row was never created.
       if (!numericId && typeof tokenUserId === 'string' && tokenUserId.startsWith('anon_')) {
         try {
-          const insertQuery = `
-            INSERT INTO users (userId, is_registered, timestamp)
-            VALUES (?, ?, NOW())
-            ON DUPLICATE KEY UPDATE userId=userId`;
+          const repairedId = await ensureAnonUserRow({ tokenUserId, reqId, caller: 'check-session' });
+          if (repairedId) {
+            const repaired = await queryPromise(
+              'SELECT id, email, first_name, is_registered FROM users WHERE id = ? LIMIT 1',
+              [repairedId]
+            );
 
-          await queryPromise(insertQuery, [tokenUserId, false]);
-
-          const repaired = await queryPromise(
-            'SELECT id, email, first_name, is_registered FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
-            [tokenUserId]
-          );
-
-          if (Array.isArray(repaired) && repaired.length > 0) {
-            const user = repaired[0];
-            console.log(`🟢 [check-session] (${reqId}) repaired missing anon user. userId=${user.id} tokenUserId=${tokenUserId}`);
-            return res.json({
-              isLoggedIn: true,
-              isRegistered: !!user.is_registered,
-              userId: user.id,
-              email: user.email ?? null,
-              shouldReinitialize: false,
-              reason: null,
-              authSource,
-            });
+            if (Array.isArray(repaired) && repaired.length > 0) {
+              const user = repaired[0];
+              console.log(`🟢 [check-session] (${reqId}) repaired missing anon user. userId=${user.id} tokenUserId=${tokenUserId}`);
+              return res.json({
+                isLoggedIn: true,
+                isRegistered: !!user.is_registered,
+                userId: user.id,
+                email: user.email ?? null,
+                shouldReinitialize: false,
+                reason: null,
+                authSource,
+              });
+            }
           }
         } catch (e) {
           console.error(`❌ [check-session] (${reqId}) failed to self-heal anon user ${tokenUserId}:`, e);
@@ -1214,6 +1210,63 @@ app.get('/testing', async (req, res) => {
   res.json(mediaJson);
 });
 
+const ensureAnonUserRow = async ({ tokenUserId, reqId, caller }) => {
+  if (typeof tokenUserId !== 'string' || !tokenUserId.startsWith('anon_')) return null;
+
+  // NOTE: the schema does not enforce UNIQUE(users.userId). Using ON DUPLICATE KEY is ineffective.
+  // To avoid duplicate anon rows under retries/concurrency, use a short MySQL advisory lock.
+  const lockName = `users.userId:${tokenUserId}`.slice(0, 64);
+  let gotLock = false;
+
+  const parseGotLock = (rows) => {
+    if (!Array.isArray(rows) || rows.length === 0) return false;
+    const row = rows[0] || {};
+    const value = row.gotLock ?? row.GOT_LOCK ?? Object.values(row)[0];
+    return value === 1 || value === '1' || value === true;
+  };
+
+  try {
+    try {
+      const lockRows = await queryPromise('SELECT GET_LOCK(?, 2) AS gotLock', [lockName]);
+      gotLock = parseGotLock(lockRows);
+      if (!gotLock) {
+        console.warn(`⚠️ [${caller}] (${reqId}) could not obtain GET_LOCK for ${tokenUserId}; continuing without lock`);
+      }
+    } catch (e) {
+      // If GET_LOCK is unavailable, continue best-effort without it.
+      console.warn(`⚠️ [${caller}] (${reqId}) GET_LOCK failed; continuing without lock: ${e.message}`);
+    }
+
+    const existing = await queryPromise(
+      'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
+      [tokenUserId]
+    );
+    if (Array.isArray(existing) && existing[0]?.id) return existing[0].id;
+
+    await queryPromise(
+      `INSERT INTO users (userId, is_registered, timestamp)
+       SELECT ?, ?, NOW()
+       FROM DUAL
+       WHERE NOT EXISTS (SELECT 1 FROM users WHERE userId = ? LIMIT 1)`,
+      [tokenUserId, false, tokenUserId]
+    );
+
+    const repaired = await queryPromise(
+      'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
+      [tokenUserId]
+    );
+    return Array.isArray(repaired) && repaired[0]?.id ? repaired[0].id : null;
+  } finally {
+    if (gotLock) {
+      try {
+        await queryPromise('SELECT RELEASE_LOCK(?)', [lockName]);
+      } catch {
+        // ignore
+      }
+    }
+  }
+};
+
 const handleInitialize = async (req, res) => {
   const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const redactToken = (t) => {
@@ -1240,22 +1293,12 @@ const handleInitialize = async (req, res) => {
     // ✅ Ensure anon_* users always have a DB row (prevents check-session "user not found" loops)
     try {
       if (typeof tokenUserId === 'string' && tokenUserId.startsWith('anon_')) {
-        const existing = await queryPromise(
-          'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
-          [tokenUserId]
-        );
-
-        if (Array.isArray(existing) && existing[0]?.id) {
-          console.log(`✅ [initialize] (${reqId}) anon user exists in DB: userId=${tokenUserId} id=${existing[0].id}`);
+        const dbId = await ensureAnonUserRow({ tokenUserId, reqId, caller: 'initialize' });
+        if (dbId) {
+          if (!req.identifiedUser.id) req.identifiedUser.id = dbId;
+          console.log(`✅ [initialize] (${reqId}) ensured anon user row. userId=${tokenUserId} id=${dbId}`);
         } else {
-          console.warn(`⚠️ [initialize] (${reqId}) identified anon user not found in DB; creating. userId=${tokenUserId}`);
-          const insertResult = await queryPromise(
-            `INSERT INTO users (userId, is_registered, timestamp)
-             VALUES (?, ?, NOW())
-             ON DUPLICATE KEY UPDATE userId = userId`,
-            [tokenUserId, false]
-          );
-          console.log(`🟡 [initialize] (${reqId}) created missing anon user row. result=${JSON.stringify(insertResult)}`);
+          console.warn(`⚠️ [initialize] (${reqId}) could not ensure anon user row. userId=${tokenUserId}`);
         }
       }
     } catch (e) {
@@ -1284,13 +1327,8 @@ const handleInitialize = async (req, res) => {
   console.log(`🟡 [initialize] (${reqId}) generated anonymous userId=${anonymousUserId} jwt=${redactToken(token)}`);
 
   try {
-    const insertQuery = `
-      INSERT INTO users (userId, is_registered, timestamp)
-      VALUES (?, ?, NOW())
-      ON DUPLICATE KEY UPDATE userId=userId`;
-
-    const insertResult = await queryPromise(insertQuery, [anonymousUserId, false]);
-    console.log(`🟡 [initialize] (${reqId}) DB user upsert ok. result=${JSON.stringify(insertResult)}`);
+    const dbId = await ensureAnonUserRow({ tokenUserId: anonymousUserId, reqId, caller: 'initialize' });
+    console.log(`🟡 [initialize] (${reqId}) ensured DB user row for new anon. userId=${anonymousUserId} id=${dbId ?? 'n/a'}`);
 
     const cookieOptions = {
       httpOnly: true,
