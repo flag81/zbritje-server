@@ -1332,11 +1332,11 @@ const handleInitialize = async (req, res) => {
     if (token && !cookieToken) {
       const cookieOptions = buildJwtCookieOptions();
       res.cookie('jwt', token, cookieOptions);
-      res.setHeader('X-Meniven-Init-Cookie', '1');
+      res.setHeader('Meniven-Init-Cookie', '1');
       console.log(`🟢 [initialize] (${reqId}) Set-Cookie jwt for identified user; options=${JSON.stringify(cookieOptions)}`);
     }
     console.log(`✅ [initialize] (${reqId}) returning identified user. token=${redactToken(token)}`);
-    return res.json({ message: 'User identified', userId: tokenUserId, token });
+    return res.json({ message: 'User identified', userId: tokenUserId, token, cookieAttempted: Boolean(token) && !Boolean(cookieToken) });
   }
 
   // No valid identified user -> create a new anonymous user + token.
@@ -1360,9 +1360,9 @@ const handleInitialize = async (req, res) => {
     const cookieOptions = buildJwtCookieOptions();
 
     res.cookie('jwt', token, cookieOptions);
-    res.setHeader('X-Meniven-Init-Cookie', '1');
+    res.setHeader('Meniven-Init-Cookie', '1');
     console.log(`✅ [initialize] (${reqId}) anonymous user initialized. Set-Cookie jwt; options=${JSON.stringify(cookieOptions)}`);
-    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId, token });
+    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId, token, cookieAttempted: true });
   } catch (err) {
     console.error(`❌ [initialize] (${reqId}) failed to insert anonymous user into DB:`, err);
     return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
