@@ -1275,6 +1275,26 @@ const handleInitialize = async (req, res) => {
     return `${t.slice(0, 10)}…${t.slice(-6)}`;
   };
 
+  const buildJwtCookieOptions = () => {
+    const forwardedProto = req.headers['x-forwarded-proto'];
+    const isHttps = Boolean(req.secure) || (typeof forwardedProto === 'string' && forwardedProto.includes('https'));
+    const host = (req.headers.host || '').split(':')[0];
+    const isMenivenDomain = host.endsWith('meniven.com');
+
+    const cookieOptions = {
+      httpOnly: true,
+      secure: isHttps,
+      // Subdomains (www <-> api) are same-site, but SameSite=None on HTTPS is the most robust
+      // across different browser cookie policies and deployment setups.
+      sameSite: isHttps ? 'None' : 'Lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+    };
+
+    // Make the cookie available to both api.meniven.com and www.meniven.com.
+    if (isMenivenDomain) cookieOptions.domain = '.meniven.com';
+    return cookieOptions;
+  };
+
   console.log(`🟢 [initialize] (${reqId}) hit ${req.method} ${req.originalUrl}`);
   console.log(`🟢 [initialize] (${reqId}) origin=${req.headers.origin || 'n/a'} ip=${req.ip} ua=${req.headers['user-agent'] || 'n/a'}`);
 
@@ -1307,7 +1327,13 @@ const handleInitialize = async (req, res) => {
     }
 
     // Also send the token in the body for mobile clients that might need it.
+    // And ensure a cookie exists for web clients even if they authenticated via Authorization.
     const token = headerToken || cookieToken;
+    if (token && !cookieToken) {
+      const cookieOptions = buildJwtCookieOptions();
+      res.cookie('jwt', token, cookieOptions);
+      console.log(`🟢 [initialize] (${reqId}) Set-Cookie jwt for identified user; options=${JSON.stringify(cookieOptions)}`);
+    }
     console.log(`✅ [initialize] (${reqId}) returning identified user. token=${redactToken(token)}`);
     return res.json({ message: 'User identified', userId: tokenUserId, token });
   }
@@ -1330,12 +1356,7 @@ const handleInitialize = async (req, res) => {
     const dbId = await ensureAnonUserRow({ tokenUserId: anonymousUserId, reqId, caller: 'initialize' });
     console.log(`🟡 [initialize] (${reqId}) ensured DB user row for new anon. userId=${anonymousUserId} id=${dbId ?? 'n/a'}`);
 
-    const cookieOptions = {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-    };
+    const cookieOptions = buildJwtCookieOptions();
 
     res.cookie('jwt', token, cookieOptions);
     console.log(`✅ [initialize] (${reqId}) anonymous user initialized. Set-Cookie jwt; options=${JSON.stringify(cookieOptions)}`);
