@@ -6,8 +6,6 @@ import db from '../connection.js';
 console.log("🔍 Checking Email Credentials:");
 console.log("📧 EMAIL_USER:", process.env.EMAIL_USER ? "Loaded" : "❌ Not Found");
 console.log("🔑 EMAIL_PASS:", process.env.EMAIL_PASS ? "Loaded" : "❌ Not Found");
-
-console.log(process.env.EMAIL_USER, process.env.EMAIL_PASS);
 console.log("🔍 Checking SMTP connection...----.....-----......");
 
 

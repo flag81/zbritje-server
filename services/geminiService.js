@@ -1,4 +1,4 @@
-import { VertexAI } from '@google-cloud/vertexai';
+import { GoogleGenAI } from '@google/genai';
 import JSON5 from 'json5';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,21 +6,10 @@ import { fileURLToPath } from 'url';
 // --- Configuration ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const keyFilePath = path.join(__dirname, '../persistent/keys/vision-ai-455010-6d2a9944437b.json');
-process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
 
-const vertexAI = new VertexAI({
-  project: 'vision-ai-455010',
-  location: 'us-central1',
-});
-
-const generativeModel = vertexAI.getGenerativeModel({
-    model: 'gemini-1.5-pro-001',
-    generation_config: {
-        response_mime_type: 'application/json',
-        temperature: 0.1, // Lower temperature for more deterministic, factual output
-    },
-});
+// Initialize Standard Google AI Studio SDK Client
+const aiStudio = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const model = 'gemini-2.5-flash';
 
 const MAX_RETRIES = 3;
 
@@ -35,7 +24,9 @@ You are an expert data extraction bot for an Albanian sales flyer application.
 Your task is to analyze a flyer image and extract all product information into a structured JSON format.
 
 **Instructions & Schema Definition:**
-- Extract every distinct product offer.
+- First, determine if the image is a sales flyer. If it is not a sales flyer (e.g., it's a logo, a single product photo, a meme, or a general announcement), return an empty products array: {"products": []}
+
+- If it IS a sales flyer, extract every distinct product offer.
 - Adhere strictly to the following JSON schema for each product.
 - If a value is not present, use the specified default (e.g., 0 for price, null for date).
 - All text, especially keywords, must be in Albanian.
@@ -96,13 +87,16 @@ export const extractProductsFromImage = async (imageUrl, metadata) => {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             console.log(`[Gemini] Sending request for imageId: ${metadata.imageId} (Attempt ${attempt})`);
-            const result = await generativeModel.generateContent([prompt, imagePart]);
+            const result = await aiStudio.models.generateContent({
+                model: model,
+                contents: [prompt, imagePart],
+                config: {
+                    responseMimeType: 'application/json',
+                    temperature: 0.1,
+                }
+            });
             
-            if (!result.response.candidates || result.response.candidates.length === 0) {
-                throw new Error("Gemini returned no candidates in the response.");
-            }
-
-            const responseText = result.response.candidates[0].content.parts[0].text;
+            const responseText = result.text;
             const parsedJson = JSON5.parse(responseText);
 
             if (parsedJson && Array.isArray(parsedJson.products)) {

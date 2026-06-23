@@ -4,9 +4,12 @@ import cors from 'cors';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { sendDailyProductNotifications } from './notificationScheduler.js';
+import { runDailyIngest } from './ingestScheduler.js';
+import cron from 'node-cron';
 import os from 'os'; // <-- FIX: Import the 'os' module
 import webPushPkg from 'web-push';
 const webPush = webPushPkg && webPushPkg.default ? webPushPkg.default : webPushPkg;
+import { corsDelegate } from './config/cors.js';
 
 import { Expo } from 'expo-server-sdk'; // 1. IMPORT THE SDK
 
@@ -23,6 +26,41 @@ import path from "path";
 import JSON5 from 'json5';
 
 const allMessages = [];
+
+const INGEST_DRY_RUN_DEFAULT = String(process.env.INGEST_DRY_RUN || '').toLowerCase() === 'true';
+const INGEST_STORE_IDS_DEFAULT = String(process.env.INGEST_STORE_IDS || '')
+  .split(',')
+  .map(id => parseInt(id.trim(), 10))
+  .filter(Number.isFinite);
+
+function parseBooleanFlag(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function flattenFacebookPostsToItems(posts) {
+  const items = [];
+  posts.forEach((post) => {
+    (post.images || []).forEach((imgObj) => {
+      items.push({
+        postId: post.postId,
+        message: post.message,
+        created_time: post.created_time,
+        uri: imgObj.uri,
+        image: imgObj.uri,
+        imageData: post.imageData,
+        imageId: imgObj.id,
+        timestamp: post.timestamp,
+      });
+    });
+  });
+  return items;
+}
 
 
 
@@ -44,20 +82,15 @@ else {
 // const credentials = JSON.parse(fs.readFileSync(keyFilePath, 'utf8'));
 
 
-console.log('GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID);
-console.log('GOOGLE_CLIENT_SECRET:', process.env.GOOGLE_CLIENT_SECRET);
+console.log('GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID ? 'Loaded' : 'Not set');
+console.log('GOOGLE_CLIENT_SECRET:', process.env.GOOGLE_CLIENT_SECRET ? 'Loaded' : 'Not set');
 
 
-import { VertexAI } from '@google-cloud/vertexai';
+import { GoogleGenAI } from '@google/genai';
 
-const vertexAI = new VertexAI({
-  project: 'vision-ai-455010', 
-  location: 'europe-west4',
-  keyFilename: keyFilePath, // Path to your service account key file
-
-}); // Replace with your project and location
-
-console.log('✅ VertexAI client initialized in server.js');
+// Initialize Standard Google AI Studio SDK Client
+const aiStudio = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+console.log('✅ Google AI Studio client initialized in server.js');
 
 
 // Load private key for Apple authentication (keeping this as it seems unrelated to image extraction)
@@ -79,7 +112,7 @@ const apify = new ApifyClient({
 });
 
 
-console.log('✅ Apify client initialized in server.js', process.env.APIFY_TOKEN );
+console.log('✅ Apify client initialized in server.js');
 
 import { format } from 'path';
 import db from './connection.js';
@@ -113,71 +146,30 @@ import axios, { all } from "axios";
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Supports form data parsing
-// --- CORS (single source of truth, applied early) ---
-// The frontend (https://www.meniven.com) calls the API (https://api.meniven.com) with cookies.
-// With credentials enabled we must NOT use '*', so we reflect only allowed origins.
-const corsDebug = process.env.CORS_DEBUG === 'true';
-
-const normalizeOrigin = (value) => {
-  if (typeof value !== 'string') return value;
-  return value.replace(/\/+$/, '');
-};
-
-const corsAllowList = new Set(
-  [
-    process.env.FRONTEND_URL,
-    process.env.FRONTEND_URL2,
-    'https://www.meniven.com',
-    'https://api.meniven.com',
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://localhost:8080',
-    'http://localhost:8081',
-    'https://singular-catfish-deciding.ngrok-free.app',
-    'https://qg048c0c0wos4o40gos4k0kc.128.140.43.244.sslip.io',
-  ].map(normalizeOrigin).filter(Boolean)
-);
-
-const localSubnetRegex = /^http:\/\/192\.168\.1\.\d{1,3}(:\d+)?$/;
-
-const corsDelegate = (req, callback) => {
-  const requestOrigin = normalizeOrigin(req.header('Origin'));
-
-  // Non-browser/server-to-server requests don't need CORS headers.
-  if (!requestOrigin) {
-    if (corsDebug) console.log('[CORS] No Origin header:', req.method, req.originalUrl);
-    return callback(null, { origin: false });
-  }
-
-  const isAllowed = corsAllowList.has(requestOrigin) || localSubnetRegex.test(requestOrigin);
-  if (!isAllowed) {
-    if (corsDebug) console.warn('[CORS] Blocked origin:', requestOrigin, req.method, req.originalUrl);
-    return callback(null, { origin: false });
-  }
-
-  if (corsDebug) console.log('[CORS] Allowed origin:', requestOrigin, req.method, req.originalUrl);
-
-  return callback(null, {
-    origin: requestOrigin,
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    optionsSuccessStatus: 204,
-  });
-};
-
 app.use(cors(corsDelegate));
 app.options('*', cors(corsDelegate));
 
-// Configure VAPID for web-push (requires VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in .env)
-webPush.setVapidDetails(
-  `mailto:${process.env.VAPID_ADMIN_EMAIL || 'admin@example.com'}`,
-  process.env.VAPID_PUBLIC_KEY,
-  process.env.VAPID_PRIVATE_KEY
-);
+// Configure VAPID for web-push.
+// In production, missing keys should NOT crash the entire API.
+const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
+const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
+const vapidAdminEmail = process.env.VAPID_ADMIN_EMAIL || 'admin@example.com';
+const webPushEnabled = Boolean(vapidPublicKey && vapidPrivateKey);
+
+if (webPushEnabled) {
+  webPush.setVapidDetails(`mailto:${vapidAdminEmail}`, vapidPublicKey, vapidPrivateKey);
+  console.log('✅ web-push VAPID configured');
+} else {
+  console.warn('⚠️ web-push disabled: missing VAPID_PUBLIC_KEY and/or VAPID_PRIVATE_KEY');
+}
 
 // Endpoint to receive push subscription objects from clients
 app.post('/subscribe-webpush', async (req, res) => {
+  if (!webPushEnabled) {
+    return res.status(503).json({
+      error: 'Web push is not configured on the server (missing VAPID keys).',
+    });
+  }
   try {
     const { subscription, userId } = req.body;
     if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
@@ -202,6 +194,11 @@ app.post('/subscribe-webpush', async (req, res) => {
 
 // Trigger notifications to all stored subscriptions
 app.post('/trigger-all-user-notifications', async (req, res) => {
+  if (!webPushEnabled) {
+    return res.status(503).json({
+      error: 'Web push is not configured on the server (missing VAPID keys).',
+    });
+  }
   try {
     const q = `SELECT subscription FROM subscriptions`;
     db.query(q, async (err, results) => {
@@ -251,19 +248,23 @@ app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUniniti
 
 
 
-passport.use(
-  new GoogleStrategy(
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  passport.use(
+    new GoogleStrategy(
       {
-          clientID: process.env.GOOGLE_CLIENT_ID,
-          clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-          callbackURL: "http://localhost:3000/auth/google/callback",
-          passReqToCallback: true,
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: "http://localhost:3000/auth/google/callback",
+        passReqToCallback: true,
       },
       (req, accessToken, refreshToken, profile, done) => {
-          return done(null, profile);
+        return done(null, profile);
       }
-  )
-);
+    )
+  );
+} else {
+  console.warn('⚠️ Google OAuth disabled: missing GOOGLE_CLIENT_ID and/or GOOGLE_CLIENT_SECRET');
+}
 
 
 // Serialize and deserialize user (use sessions)
@@ -437,18 +438,10 @@ app.post("/auth/apple/callback", async (req, res) => {
 // Specify the model you want to use (e.g., Gemini 1.5 Pro)
 //const model = 'gemini-2.5-pro'; // Updated to Gemini 2.5 Pro
 
-const model = 'gemini-2.0-flash-lite-001';
+const model = 'gemini-2.5-flash';
 
-// Access the generative model
-const generativeModel = vertexAI.getGenerativeModel({
-    model: model,
-    generation_config: {
-        temperature: 0.1,
-        topP: 0.8,
-        topK: 40,
-        maxOutputTokens: 4096 // Increased max output tokens for potentially larger JSON
-    },
-});
+// Access the generative model for AI Studio
+const generativeModel = aiStudio.models;
 
 
 
@@ -568,6 +561,113 @@ app.get('/facebook-posts', async (req, res) => {
     debugMessages.push(`❌ [facebook-posts] API error: ${err?.message || err}`);
     console.error('❌ [facebook-posts] API error:', err);
     res.status(500).json({ error: err.message, debugMessages });
+  }
+});
+
+// Minimal, safe ingestion trigger for one store to validate extraction before DB writes.
+app.post('/ingest-store-dry-run', async (req, res) => {
+  const requestedStoreId = parseInt(req.body?.storeId ?? req.query?.storeId, 10);
+  const requestedPageId = req.body?.facebookPageId ?? req.query?.facebookPageId;
+  const maxImages = Math.max(1, parseInt(req.body?.maxImages ?? req.query?.maxImages ?? '8', 10) || 8);
+  const dryRun = parseBooleanFlag(req.body?.dryRun ?? req.query?.dryRun, true);
+
+  if (!Number.isFinite(requestedStoreId) && !requestedPageId) {
+    return res.status(400).json({ error: 'storeId or facebookPageId is required.' });
+  }
+
+  if (
+    Number.isFinite(requestedStoreId) &&
+    INGEST_STORE_IDS_DEFAULT.length > 0 &&
+    !INGEST_STORE_IDS_DEFAULT.includes(requestedStoreId)
+  ) {
+    return res.status(403).json({
+      error: 'storeId is not allowed by INGEST_STORE_IDS scope.',
+      allowedStoreIds: INGEST_STORE_IDS_DEFAULT,
+    });
+  }
+
+  const dbQuery = (query, params) => new Promise((resolve, reject) => {
+    db.query(query, params, (err, result) => {
+      if (err) return reject(err);
+      resolve(result);
+    });
+  });
+
+  try {
+    let storeId = requestedStoreId;
+    let facebookPageId = requestedPageId;
+
+    if (!facebookPageId && Number.isFinite(storeId)) {
+      const storeRows = await dbQuery(
+        'SELECT storeId, facebookPageId FROM stores WHERE storeId = ? AND active = true LIMIT 1',
+        [storeId]
+      );
+
+      if (!storeRows.length || !storeRows[0].facebookPageId) {
+        return res.status(404).json({ error: 'No active store/facebookPageId found for the provided storeId.' });
+      }
+      facebookPageId = storeRows[0].facebookPageId;
+    }
+
+    if (!Number.isFinite(storeId) && facebookPageId) {
+      const storeRows = await dbQuery(
+        'SELECT storeId FROM stores WHERE facebookPageId = ? AND active = true LIMIT 1',
+        [facebookPageId]
+      );
+      if (storeRows.length) {
+        storeId = storeRows[0].storeId;
+      }
+    }
+
+    if (!Number.isFinite(storeId)) {
+      return res.status(400).json({ error: 'Unable to resolve a valid storeId for ingestion.' });
+    }
+
+    const posts = await fetchFacebookPosts(facebookPageId);
+    const items = flattenFacebookPostsToItems(posts).filter(item => Boolean(item.uri));
+    const selectedItems = items.slice(0, maxImages);
+
+    if (selectedItems.length === 0) {
+      return res.status(200).json({
+        message: 'No image items found for this store/page.',
+        dryRun,
+        counts: { postsFetched: posts.length, imagesSelected: 0, productsExtracted: 0, productsInserted: 0 },
+      });
+    }
+
+    const { uploadMultipleFacebookPhotosToCloudinary } = await import('./uploadFacebookPhoto.js');
+    const imageUrlsToUpload = selectedItems.map(item => ({ imageUrl: item.uri, imageId: item.imageId }));
+    const uploadResults = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
+
+    const products = await formatDataToJson(
+      uploadResults,
+      storeId,
+      1,
+      `${storeId}-${Date.now()}`,
+      selectedItems.map(item => item.message || ''),
+      selectedItems[0].postId || null,
+      selectedItems[0].imageId || null,
+      selectedItems[0].timestamp || Math.floor(Date.now() / 1000),
+      { dryRun, runLabel: '/ingest-store-dry-run' }
+    );
+
+    return res.status(200).json({
+      message: dryRun ? 'Dry-run ingestion completed.' : 'Ingestion completed.',
+      dryRun,
+      storeId,
+      facebookPageId,
+      counts: {
+        postsFetched: posts.length,
+        imagesSelected: selectedItems.length,
+        imagesUploaded: uploadResults.length,
+        productsExtracted: products.length,
+        productsInserted: dryRun ? 0 : products.length,
+      },
+      sampleImageIds: selectedItems.slice(0, 5).map(item => item.imageId),
+    });
+  } catch (error) {
+    console.error('❌ [/ingest-store-dry-run] Error:', error);
+    return res.status(500).json({ error: 'Failed to run ingestion.', details: error.message });
   }
 });
 
@@ -1125,7 +1225,11 @@ allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(i
       // Optionally add: postText, facebookUrl
       postId,
       imageId,
-      timestamp // Pass timestamp if needed
+      timestamp, // Pass timestamp if needed
+      {
+        dryRun: INGEST_DRY_RUN_DEFAULT,
+        runLabel: '/extract-text-single',
+      }
     );
 
 
@@ -1518,6 +1622,21 @@ async function insertProducts1(jsonData) {
           throw new Error(`Invalid numeric value for imageId: ${imageId}`);
       }
 
+      // --- FIX: Ensure flyer_book_id is treated as a valid INT ---
+      let numericFlyerBookId = null;
+      if (flyer_book_id !== undefined && flyer_book_id !== null) {
+        // If it's a string like '1-1782075117099', strip the storeId prefix and extract the timestamp part
+        const strVal = String(flyer_book_id);
+        const parts = strVal.split('-');
+        const targetValue = parts.length > 1 ? parts[1] : parts[0];
+        // Parse as integer, keeping only the final 9 digits to prevent overflowing MySQL 32-bit INT limit (max 2147483647)
+        const parsed = parseInt(targetValue, 10);
+        if (!isNaN(parsed)) {
+          // If the timestamp matches Millisecond format like 1782075117099, reduce it to fit INT
+          numericFlyerBookId = parsed > 2147483647 ? parsed % 1000000000 : parsed;
+        }
+      }
+
       allMessages.push(`Processing product with ImageId: ${numericImageId}`);
       allMessages.push(`timestamp in insert : ${formattedTimestamp}`);
 
@@ -1530,7 +1649,7 @@ async function insertProducts1(jsonData) {
       const productResult = await dbQuery(
         `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId , timestamp)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? , ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, numericImageId, formattedTimestamp]
+        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, numericFlyerBookId, postId, numericImageId, formattedTimestamp]
       );
 
       const productId = productResult.insertId;
@@ -1637,8 +1756,11 @@ Return the date in the format YYYY-MM-DD. If no date is found, return "No date f
  * - Collects and returns all extracted product objects in a single array.
  * - Adds extensive debugging for each step and image.
  */
-async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, postText, postId, imageId, timestamp) {
+async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, postText, postId, imageId, timestamp, options = {}) {
+  const dryRun = parseBooleanFlag(options.dryRun, false);
+  const runLabel = options.runLabel || 'formatDataToJson';
   console.log('🔍 [formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...');
+  console.log(`[${runLabel}] dryRun=${dryRun}`);
   console.log('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);  
   console.log('Image ID from formatDataToJson:', imageId); // Log imageId if provided
 
@@ -1839,29 +1961,30 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 `;
 
     try {
-      // Prepare Gemini Vision API input for this image
+      // Fetch image buffer and convert to Part format for GoogleGenAI SDK
       const imagePart = {
-        fileData: {
+        inlineData: {
           mimeType: 'image/jpeg',
-          fileUri: url,
+          data: Buffer.from(await axios.get(url, { responseType: 'arraybuffer' }).then(res => res.data)).toString('base64'),
         }
       };
 
-      const contents = [
-        {
-          role: 'user',
-          parts: [
-            { text: geminiPrompt },
-            imagePart
-          ],
-        },
-      ];
-
       const response = await generativeModel.generateContent({
-        contents,
+        model: model,
+        contents: [
+          geminiPrompt,
+          imagePart
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+          topP: 0.8,
+          topK: 40,
+          maxOutputTokens: 4096,
+        }
       });
 
-      let text = response.response.candidates[0].content.parts[0].text;
+      let text = response.text;
 
       console.log(`[formatDataToJson] Raw Gemini Output for image #${i + 1}:`, text);
       allMessages.push(`[formatDataToJson] Raw Gemini Output for image #${i + 1}: ${text}`);
@@ -1883,7 +2006,12 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 
         // Call the insertion function with the parsed products array
         if (validProducts.length > 0) {
-          await insertProducts1(validProducts);
+          if (dryRun) {
+            console.log(`[${runLabel}] Dry-run active, skipping DB insert for ${validProducts.length} products.`);
+            allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for ${validProducts.length} products.`);
+          } else {
+            await insertProducts1(validProducts);
+          }
         }
 
         allProducts = allProducts.concat(validProducts);
@@ -2955,7 +3083,48 @@ app.post('/upload', upload.array('images', 10), async (req, res) => {
 
 
 
+// Manual trigger for the daily ingest pipeline (useful for Dashboard testing)
+app.post('/trigger-daily-ingest', async (req, res) => {
+  const storeIds = Array.isArray(req.body?.storeIds) && req.body.storeIds.length > 0
+    ? req.body.storeIds.map(id => parseInt(id, 10)).filter(Number.isFinite)
+    : [];
+  const label = storeIds.length > 0 ? `stores [${storeIds.join(', ')}]` : 'all active stores';
+  console.log(`[Manual] Daily ingest triggered for ${label}.`);
+  res.status(202).json({ message: `Daily ingest started for ${label}. Check server logs for progress.` });
+  try {
+    await runDailyIngest(formatDataToJson, storeIds);
+  } catch (err) {
+    console.error('[Manual] Daily ingest error:', err.message);
+  }
+});
+
+// Automatic daily ingest at noon (12:00) server time
+cron.schedule('0 12 * * *', async () => {
+  console.log('[Cron] Noon trigger fired — starting daily ingest...');
+  try {
+    await runDailyIngest(formatDataToJson);
+  } catch (err) {
+    console.error('[Cron] Daily ingest failed:', err.message);
+  }
+});
+console.log('[Cron] Daily noon ingest scheduler registered.');
+
 const port = process.env.PORT || 3000;
+
+async function checkGeminiModel() {
+  try {
+    console.log(`[Gemini] Checking model "${model}" via Google AI Studio...`);
+    const result = await generativeModel.generateContent({
+      model: model,
+      contents: ['Reply with the single word: OK'],
+    });
+    const reply = result?.text?.trim();
+    console.log(`✅ [Gemini] Model check passed. Response: "${reply}"`);
+  } catch (err) {
+    const summary = err.message?.split('\n')[0] ?? err.toString();
+    console.error(`❌ [Gemini] Model check FAILED: ${summary}`);
+  }
+}
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
@@ -2968,4 +3137,5 @@ app.listen(port, () => {
       }
     }
   }
+  checkGeminiModel();
 });
