@@ -121,7 +121,7 @@ import { fetchFacebookPosts } from './rapidApi.js';
 
 
 import cookieParser from 'cookie-parser';
-import bodyParser from'body-parser';
+import bodyParser from 'body-parser';
 import identifyUserMiddleware from './identifyUserMiddleware.js';
 
 import AppleSigninAuth from 'apple-signin-auth';
@@ -237,7 +237,8 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUninitialized: true ,
+app.use(session({
+  secret: process.env.SESSION_SECRET, resave: false, saveUninitialized: true,
 
   cookie: {
     maxAge: 5 * 60 * 1000, // Set session duration
@@ -418,7 +419,7 @@ app.post("/auth/apple/callback", async (req, res) => {
 
           res.cookie("jwt", token, {
             httpOnly: true,
-            secure:true,
+            secure: true,
             sameSite: "None",
             maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
           });
@@ -455,8 +456,10 @@ app.use(identifyUserMiddleware);
 
 
 import authRoutes from "./routes/authRoutes.js";
+import jobLogRoutes from "./routes/jobLogRoutes.js";
 import { time } from 'console';
 app.use("/auth", authRoutes);
+app.use("/job-logs", jobLogRoutes);
 
 
 
@@ -464,7 +467,7 @@ app.use("/auth", authRoutes);
 app.post('/dashboardLogin', (req, res) => {
   const { username, password } = req.body;
   console.log('🔒 Login attempt:', username);
-  console.log('🔒 Password:' , password) ;
+  console.log('🔒 Password:', password);
   const query = 'SELECT * FROM users WHERE first_name = ? AND last_name = ?';
   db.query(query, [username, password], (err, results) => {
     if (err) return res.status(500).json({ message: 'Server error' });
@@ -503,7 +506,7 @@ app.get('/facebook-photos', async (req, res) => {
   allMessages.push(`📸 Extracted ${photoArray.length} photos from page ID: ${pageId}`);
 
   // Return in the format expected by Dashboard.jsx
-  res.json({ items: photoArray , allMessages: allMessages });
+  res.json({ items: photoArray, allMessages: allMessages });
 
 });
 
@@ -540,7 +543,7 @@ app.get('/facebook-posts', async (req, res) => {
           created_time: post.created_time,
           uri: imgObj.uri,
           image: imgObj.uri,
-          imageData: post.imageData ,
+          imageData: post.imageData,
           imageId: imgObj.id,
           timestamp: post.timestamp // Use post timestamp or current time
         });
@@ -760,10 +763,34 @@ app.post('/trigger-user-notifications', async (req, res) => {
 app.post('/trigger-all-user-notifications', async (req, res) => {
   console.log('[Manual Trigger] Received request to run the full notification job for all users.');
   try {
-    // We trigger the function but don't wait for it to finish,
-    // allowing the dashboard to get an immediate response.
-    sendDailyProductNotifications(true); 
-    
+    // Run the notification job asynchronously in background
+    (async () => {
+      try {
+        await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+          'manual-all-user-notifications',
+          'started',
+          'Manual notification job started for all users.'
+        ]);
+        await sendDailyProductNotifications(true);
+        await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+          'manual-all-user-notifications',
+          'success',
+          'Manual notification job completed for all users.'
+        ]);
+      } catch (err) {
+        console.error('[Manual] Push notifications job error:', err.message);
+        try {
+          await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+            'manual-all-user-notifications',
+            'failed',
+            err.message
+          ]);
+        } catch (dbErr) {
+          console.error('[Manual] Failed to log push notification failure to database:', dbErr.message);
+        }
+      }
+    })();
+
     res.status(202).json({ message: 'Procesi i dërgimit të njoftimeve ka filluar. Kontrolloni regjistrat e serverit për detaje.' });
   } catch (error) {
     console.error('[Manual Trigger] Error starting the notification job:', error);
@@ -818,7 +845,7 @@ app.get('/products-by-ids', async (req, res) => {
 app.post('/get-facebook-photos', async (req, res) => {
 
 
- // console.log(`🔍 Fetching Facebook photos for page: ${pageUrl} on date: ${date}`);
+  // console.log(`🔍 Fetching Facebook photos for page: ${pageUrl} on date: ${date}`);
 
 
   const { selectedStore, facebookUrl } = req.body;
@@ -828,8 +855,8 @@ app.post('/get-facebook-photos', async (req, res) => {
 
 
   const facebookData = [
-    {url: facebookUrl, storeId: selectedStore}
-  ]; 
+    { url: facebookUrl, storeId: selectedStore }
+  ];
 
   console.log(`🔍 Facebook data to scrape:`, facebookData);
 
@@ -839,16 +866,16 @@ app.post('/get-facebook-photos', async (req, res) => {
 
 
 
-  if(facebookData.length === 0) {
+  if (facebookData.length === 0) {
     console.error(`❌ No URLs found for storeId ${mystoreId}`);
     return res.status(404).json({ error: `No URLs found for storeId ${mystoreId}` });
   }
-  
+
 
 
   try {
     const input = {
-      startUrls: facebookData ,
+      startUrls: facebookData,
       resultsLimit: 10,
       proxy: {
         useApifyProxy: true,
@@ -1002,28 +1029,28 @@ app.get("/auth/google/callback", passport.authenticate("google", { failureRedire
   const token = req.cookies.jwt;
 
   if (!token) {
-      console.error("⚠️ No JWT token found in cookies.");
-      return res.status(400).json({ error: "JWT token is missing" });
+    console.error("⚠️ No JWT token found in cookies.");
+    return res.status(400).json({ error: "JWT token is missing" });
   }
 
   try {
-      console.log("Using TOKEN_SECRET for verification:", process.env.TOKEN_SECRET);
-      const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-      console.log("✅ Decoded Token:", decoded);
-      const userId = decoded.userId;
-      const email = req.user.emails[0].value;
-      console.log(`Updating email for userId: ${userId}, New Email: ${email}`);
-      const query = `UPDATE users SET email = ? WHERE userId = ?`;
-      db.query(query, [email, userId], (err, result) => {
-          if (err) {
-              console.error("❌ Error updating user email:", err);
-              return res.status(500).json({ error: "Database error" });
-          }
-          res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
-      });
+    console.log("Using TOKEN_SECRET for verification:", process.env.TOKEN_SECRET);
+    const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
+    console.log("✅ Decoded Token:", decoded);
+    const userId = decoded.userId;
+    const email = req.user.emails[0].value;
+    console.log(`Updating email for userId: ${userId}, New Email: ${email}`);
+    const query = `UPDATE users SET email = ? WHERE userId = ?`;
+    db.query(query, [email, userId], (err, result) => {
+      if (err) {
+        console.error("❌ Error updating user email:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+      res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
+    });
   } catch (err) {
-      console.error("❌ JWT Verification Error:", err.message);
-      return res.status(401).json({ error: "Invalid token" });
+    console.error("❌ JWT Verification Error:", err.message);
+    return res.status(401).json({ error: "Invalid token" });
   }
 });
 
@@ -1037,7 +1064,7 @@ app.get("/auth/google/callback3", passport.authenticate("google", { failureRedir
   const name = req.user.displayName;
 
   if (!token) {
-      return res.status(400).json({ error: "JWT token is missing" });
+    return res.status(400).json({ error: "JWT token is missing" });
   }
 
   console.log("Received Token:", token);
@@ -1051,11 +1078,11 @@ app.get("/auth/google/callback3", passport.authenticate("google", { failureRedir
     console.log("User ID from JWT:", userId);
     const query = `UPDATE users SET email = ? WHERE userId = ?`;
     db.query(query, [email, userId], (err, result) => {
-        if (err) {
-            console.error("Error updating user email:", err);
-            return res.status(500).json({ error: "Database error" });
-        }
-        res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
+      if (err) {
+        console.error("Error updating user email:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+      res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
     });
   } catch (err) {
     console.error("❌ JWT Verification Error:", err.message);
@@ -1073,7 +1100,7 @@ const upload = multer({ dest: 'uploads/' }); // Define upload middleware
 
 app.post('/extract-sale-end-date', async (req, res) => {
 
-  const { photos} = req.body;
+  const { photos } = req.body;
 
   const imageUrls = photos;
 
@@ -1081,7 +1108,7 @@ app.post('/extract-sale-end-date', async (req, res) => {
   console.log('🔍 Extracting sale end date from image URL:', photos);
 
 
-try {
+  try {
     const results = [];
     for (const imageUrl of imageUrls) {
       let sale_end_date = null;
@@ -1123,15 +1150,15 @@ app.post('/extract-text-single', async (req, res) => {
     return res.status(400).json({ message: 'No images array provided.' });
   }
 
-// check if storeId and userId are provided in the request body
+  // check if storeId and userId are provided in the request body
 
-console.log('🔍 [extract-text-single] Received images:', images);
-console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
-console.log('🔍 [extract-text-single] Image idss', images[0].imageId) ;
+  console.log('🔍 [extract-text-single] Received images:', images);
+  console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
+  console.log('🔍 [extract-text-single] Image idss', images[0].imageId);
 
-allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(images)}`);
+  allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(images)}`);
 
- 
+
   if (!images[0].storeId) {
     console.error('❌ Missing storeId in request body.');
     return res.status(400).json({ message: 'Missing storeId in request body.' });
@@ -1163,7 +1190,7 @@ allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(i
   const imageUrlsToUpload = images.map(img => ({
     imageUrl: img.imageUrl,
     imageId: img.imageId,
-    
+
   }));
 
 
@@ -1171,32 +1198,32 @@ allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(i
   let cloudinaryUrls = [];
 
 
-    try {
-      uploadResults = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
-      cloudinaryUrls = uploadResults.map(img => img.uploadedUrl);
-      //imageIds = uploadResults.map(img => img.imageId);
-      console.log('✅ Uploaded images to Cloudinary.');
-    } catch (err) {
-      console.error('❌ Error uploading images to Cloudinary:', err);
-      return res.status(500).json({ error: 'Failed to upload images to Cloudinary', details: err.message });
-    }
+  try {
+    uploadResults = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
+    cloudinaryUrls = uploadResults.map(img => img.uploadedUrl);
+    //imageIds = uploadResults.map(img => img.imageId);
+    console.log('✅ Uploaded images to Cloudinary.');
+  } catch (err) {
+    console.error('❌ Error uploading images to Cloudinary:', err);
+    return res.status(500).json({ error: 'Failed to upload images to Cloudinary', details: err.message });
+  }
 
   // print storeId and userId from images 
   console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
 
   // Prepare metadata arrays for formatDataToJson
-  const storeId  = images[0].storeId; // Assuming storeId is provided in the first image object
+  const storeId = images[0].storeId; // Assuming storeId is provided in the first image object
   const postId = images[0].postId; // Optional postId, default to null if not provided
   const userId = images[0].userId || 1; // Default to 1 if userId not provided
   const flyerBookId = images[0].flyerBookId // Generate random flyerBookId if not provided
   // Optionally, collect postText and facebookUrl if you want to use them in formatDataToJson
   const postText = newImages.map(img => img.postText || '');
-  const imageId = images[0].imageId; 
+  const imageId = images[0].imageId;
 
   const timestamp = images[0].timestamp // Use created_time or current time
   // print potText array
 
-  
+
 
   console.log('🔍 [extract-text-single] timestamp', timestamp);
 
@@ -1482,7 +1509,7 @@ app.get('/initialize-anonymous', async (req, res) => {
     // Insert a new anonymous user into the database
     // The `userId` will be auto-incremented. Other fields are nullable.
     const [result] = await db.promise().query('INSERT INTO users () VALUES ()');
-    
+
     const userId = result.insertId;
     if (!userId) {
       return res.status(500).json({ message: 'Failed to create anonymous user.' });
@@ -1507,15 +1534,15 @@ app.get('/initialize', handleInitialize);
 app.get('/initialize2', handleInitialize);
 
 
-app.post('/save-preferences',  (req, res) => {
+app.post('/save-preferences', (req, res) => {
   const { userId } = req.user;
   const { preferences } = req.body;
   res.json({ message: 'Preferences saved', userId, preferences });
 });
 
-app.get('/get-preferences',  (req, res) => {
+app.get('/get-preferences', (req, res) => {
   const { userId } = req.user;
-  res.json({ message: 'Preferences retrieved', userId});
+  res.json({ message: 'Preferences retrieved', userId });
 });
 
 
@@ -1593,33 +1620,33 @@ async function insertProducts1(jsonData) {
   try {
     await dbQuery('START TRANSACTION');
     for (const product of products) {
-      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId , imageId, timestamp } = product;
+      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId, imageId, timestamp } = product;
       console.log('Processing product:', product);
 
-       const dateObject = new Date(timestamp);
+      const dateObject = new Date(timestamp);
       const formattedTimestamp = dateObject.toISOString().slice(0, 19).replace('T', ' ');
-      
 
-      console.log('Product postId:', postId );
+
+      console.log('Product postId:', postId);
 
       console.log('timestamp insert product:', timestamp);
-      
+
 
       allMessages.push(`Processing product with ImageId: ${imageId}`);
       allMessages.push(`timestamp in insert : ${timestamp}`);
 
       // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
-// if the price is missing or null set it to 0
+      // if the price is missing or null set it to 0
 
       // --- FIX: Ensure prices are parsed as numbers before insertion ---
       const oldPriceNumber = old_price ? parseFloat(String(old_price).replace(',', '.').replace(/[^0-9.-]/g, '')) : 0;
       const newPriceNumber = new_price ? parseFloat(String(new_price).replace(',', '.').replace(/[^0-9.-]/g, '')) : 0;
 
 
-            // --- FIX: Ensure imageId is treated as a number ---
+      // --- FIX: Ensure imageId is treated as a number ---
       const numericImageId = parseInt(imageId, 10);
       if (isNaN(numericImageId)) {
-          throw new Error(`Invalid numeric value for imageId: ${imageId}`);
+        throw new Error(`Invalid numeric value for imageId: ${imageId}`);
       }
 
       // --- FIX: Ensure flyer_book_id is treated as a valid INT ---
@@ -1640,7 +1667,7 @@ async function insertProducts1(jsonData) {
       allMessages.push(`Processing product with ImageId: ${numericImageId}`);
       allMessages.push(`timestamp in insert : ${formattedTimestamp}`);
 
-     
+
 
       console.log('Image URL:', image_url);
       allMessages.push(`Image URL: ${image_url}`);
@@ -1747,6 +1774,67 @@ Return the date in the format YYYY-MM-DD. If no date is found, return "No date f
   return saleEndDate || 'No date found';
 }
 
+// Salvage complete JSON objects from a possibly truncated JSON array string.
+// This helps when the model output is cut off before the final closing brackets.
+function salvageProductsFromTruncatedJsonArray(rawText) {
+  if (!rawText || typeof rawText !== 'string') return [];
+
+  const normalized = rawText.trim();
+  const startIdx = normalized.indexOf('[');
+  if (startIdx === -1) return [];
+
+  const body = normalized.slice(startIdx + 1);
+  const objects = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let objStart = -1;
+
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') {
+      if (depth === 0) objStart = i;
+      depth += 1;
+      continue;
+    }
+
+    if (ch === '}') {
+      if (depth > 0) depth -= 1;
+      if (depth === 0 && objStart !== -1) {
+        const objText = body.slice(objStart, i + 1);
+        try {
+          const parsed = JSON5.parse(objText);
+          if (parsed && typeof parsed === 'object') {
+            objects.push(parsed);
+          }
+        } catch {
+          // Ignore invalid partial object fragments.
+        }
+        objStart = -1;
+      }
+    }
+  }
+
+  return objects;
+}
+
 
 // ...existing code...
 
@@ -1759,15 +1847,31 @@ Return the date in the format YYYY-MM-DD. If no date is found, return "No date f
 async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, postText, postId, imageId, timestamp, options = {}) {
   const dryRun = parseBooleanFlag(options.dryRun, false);
   const runLabel = options.runLabel || 'formatDataToJson';
+  const diagnostics = options.diagnostics && typeof options.diagnostics === 'object' ? options.diagnostics : null;
+  if (diagnostics) {
+    if (!Array.isArray(diagnostics.imageResults)) diagnostics.imageResults = [];
+    if (!Array.isArray(diagnostics.errors)) diagnostics.errors = [];
+  }
+
+  const recordImageResult = (result) => {
+    if (!diagnostics) return;
+    diagnostics.imageResults.push(result);
+  };
+
+  const recordError = (error) => {
+    if (!diagnostics) return;
+    diagnostics.errors.push(error);
+  };
+
   console.log('🔍 [formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...');
   console.log(`[${runLabel}] dryRun=${dryRun}`);
-  console.log('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);  
+  console.log('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
   console.log('Image ID from formatDataToJson:', imageId); // Log imageId if provided
 
-   allMessages.push('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
+  allMessages.push('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
   allMessages.push(`[formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...`);
- allMessages.push(`[formatDataToJson] Image URLs: ${JSON.stringify(uploadResults)}`);
- //for imageId 
+  allMessages.push(`[formatDataToJson] Image URLs: ${JSON.stringify(uploadResults)}`);
+  //for imageId 
   allMessages.push(`[formatDataToJson] Image ID: ${imageId}`); // Log imageId if provided
 
 
@@ -1782,21 +1886,21 @@ async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, pos
   //const formattedTimestamp = date.toISOString().split('T')[0] + ' ' + date.toTimeString().split(' ')[0]; // Format to YYYY-MM-DD HH:mm:ss
   //const formattedTimestamp = new Date(timestamp).toISOString().split('T')[0];
 
- // const formattedTimestamp = new Date(timestamp * 1000);
+  // const formattedTimestamp = new Date(timestamp * 1000);
 
   //const formattedTimestamp = date.toString()
 
 
-    // --- FIX: Robust timestamp parsing ---
+  // --- FIX: Robust timestamp parsing ---
   let date;
   // Check if timestamp is a valid number (for UNIX timestamps)
   if (typeof timestamp === 'number' && !isNaN(timestamp)) {
     date = new Date(timestamp * 1000); // Convert UNIX timestamp to milliseconds
-  } 
+  }
   // Check if timestamp is a non-empty string (for ISO strings)
   else if (typeof timestamp === 'string' && timestamp.trim() !== '') {
     date = new Date(timestamp);
-  } 
+  }
   // Fallback if timestamp is null, undefined, or invalid
   else {
     console.warn(`[formatDataToJson] Invalid or missing timestamp received. Defaulting to current time.`);
@@ -1822,14 +1926,14 @@ async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, pos
   let allProducts = [];
 
   for (let i = 0; i < uploadResults.length; i++) {
-       const { uploadedUrl, imageId } = uploadResults[i];
+    const { uploadedUrl, imageId } = uploadResults[i];
     const url = uploadedUrl;
     const origUrl = uploadedUrl;
     console.log(`🔎 [formatDataToJson] Processing image #${i + 1}:`, url);
 
     // Compose the Gemini prompt for this image
-    const geminiPrompt = 
-    `You are an AI assistant that specializes in extracting structured product sale information from an image of an Albanian retail flyer extracted from Facebook Post.
+    const geminiPrompt =
+      `You are an AI assistant that specializes in extracting structured product sale information from an image of an Albanian retail flyer extracted from Facebook Post.
 
 Your task is to analyze the image, identify distinct product entries, and extract the product description, original price (if present), sale price, and discount percentage for each. A product entry typically consists of a product description and one or two prices. Original prices are usually higher and may be positioned near the sale price.
 
@@ -1957,6 +2061,11 @@ if there is a keyword like "ver*" add a keyword "vene" as well to cover both spe
 if there is a keyword like "qepe" add a keyword "kep" as well to cover both spellings.
 The \`keywords\` field should be an array of strings. Limit the keywords to the most relevant 5 per product.
 
+To reduce response truncation risk:
+- Return at most 25 product objects for one image.
+- Return compact JSON only (no markdown, no prose, no comments, no code fences).
+- If there are more than 25 offers, keep the clearest and most complete ones.
+
 Provide ONLY the JSON array of extracted product objects in your response. Do not include any introductory or concluding text, explanations, or code block markers. Ensure the output is valid JSON.
 `;
 
@@ -1980,7 +2089,7 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
           temperature: 0.1,
           topP: 0.8,
           topK: 40,
-          maxOutputTokens: 4096,
+          maxOutputTokens: 8192,
         }
       });
 
@@ -2002,7 +2111,14 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
           ? products.filter(product => product.valid_product !== false)
           : [];
 
-          allMessages.push(`[formatDataToJson] Valid products extracted for image #${i + 1}: ${validProducts}`);
+        allMessages.push(`[formatDataToJson] Valid products extracted for image #${i + 1}: ${validProducts}`);
+
+        recordImageResult({
+          storeId,
+          imageId,
+          validProductsCount: validProducts.length,
+          source: 'parsed',
+        });
 
         // Call the insertion function with the parsed products array
         if (validProducts.length > 0) {
@@ -2020,6 +2136,137 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
         console.error(`[formatDataToJson] JSON Parsing Error for image #${i + 1}:`, parseError);
         console.error(`[formatDataToJson] Failed JSON Text for image #${i + 1}:`, text);
         allMessages.push(`[formatDataToJson] JSON Parsing Error for image #${i + 1}: ${parseError.message}`);
+
+        const salvagedProducts = salvageProductsFromTruncatedJsonArray(text);
+        if (salvagedProducts.length > 0) {
+          const validProducts = salvagedProducts.filter(product => product.valid_product !== false);
+          console.log(`[formatDataToJson] Salvaged ${validProducts.length} valid products for image #${i + 1}.`);
+          allMessages.push(`[formatDataToJson] Salvaged ${validProducts.length} valid products for image #${i + 1}.`);
+
+          recordImageResult({
+            storeId,
+            imageId,
+            validProductsCount: validProducts.length,
+            source: 'salvaged',
+          });
+
+          if (validProducts.length > 0) {
+            if (dryRun) {
+              console.log(`[${runLabel}] Dry-run active, skipping DB insert for salvaged ${validProducts.length} products.`);
+              allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for salvaged ${validProducts.length} products.`);
+            } else {
+              await insertProducts1(validProducts);
+            }
+            allProducts = allProducts.concat(validProducts);
+          }
+        } else {
+          // Retry once with an even stricter compact-output instruction.
+          try {
+            const retryPrompt = `${geminiPrompt}\n\nRETRY MODE: Your previous output was truncated/invalid. Return ONLY a compact valid JSON array, max 15 product objects.`;
+            const retryResponse = await generativeModel.generateContent({
+              model: model,
+              contents: [
+                retryPrompt,
+                imagePart
+              ],
+              config: {
+                responseMimeType: 'application/json',
+                temperature: 0.1,
+                topP: 0.8,
+                topK: 40,
+                maxOutputTokens: 8192,
+              }
+            });
+
+            let retryText = retryResponse.text;
+            retryText = retryText.replace(/^```json\s*/, '').replace(/\s*```$/, '').replace(/`/g, '');
+
+            try {
+              const retryProducts = JSON5.parse(retryText);
+              const validRetryProducts = Array.isArray(retryProducts)
+                ? retryProducts.filter(product => product.valid_product !== false)
+                : [];
+
+              recordImageResult({
+                storeId,
+                imageId,
+                validProductsCount: validRetryProducts.length,
+                source: 'retry-parsed',
+              });
+
+              if (validRetryProducts.length > 0) {
+                if (dryRun) {
+                  console.log(`[${runLabel}] Dry-run active, skipping DB insert for retried ${validRetryProducts.length} products.`);
+                  allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for retried ${validRetryProducts.length} products.`);
+                } else {
+                  await insertProducts1(validRetryProducts);
+                }
+                allProducts = allProducts.concat(validRetryProducts);
+                console.log(`[formatDataToJson] Retry succeeded for image #${i + 1} with ${validRetryProducts.length} products.`);
+                allMessages.push(`[formatDataToJson] Retry succeeded for image #${i + 1} with ${validRetryProducts.length} products.`);
+              } else {
+                recordError({
+                  storeId,
+                  imageId,
+                  type: 'json-parse',
+                  message: `${parseError.message} (retry returned 0 valid products)`,
+                });
+                recordImageResult({
+                  storeId,
+                  imageId,
+                  validProductsCount: 0,
+                  source: 'retry-empty',
+                });
+              }
+            } catch (retryParseError) {
+              const retrySalvaged = salvageProductsFromTruncatedJsonArray(retryText);
+              const validRetrySalvaged = retrySalvaged.filter(product => product.valid_product !== false);
+
+              if (validRetrySalvaged.length > 0) {
+                recordImageResult({
+                  storeId,
+                  imageId,
+                  validProductsCount: validRetrySalvaged.length,
+                  source: 'retry-salvaged',
+                });
+
+                if (dryRun) {
+                  console.log(`[${runLabel}] Dry-run active, skipping DB insert for retry-salvaged ${validRetrySalvaged.length} products.`);
+                  allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for retry-salvaged ${validRetrySalvaged.length} products.`);
+                } else {
+                  await insertProducts1(validRetrySalvaged);
+                }
+                allProducts = allProducts.concat(validRetrySalvaged);
+              } else {
+                recordError({
+                  storeId,
+                  imageId,
+                  type: 'json-parse',
+                  message: `${parseError.message}; retry parse failed: ${retryParseError.message}`,
+                });
+                recordImageResult({
+                  storeId,
+                  imageId,
+                  validProductsCount: 0,
+                  source: 'parse-failed',
+                });
+              }
+            }
+          } catch (retryError) {
+            recordError({
+              storeId,
+              imageId,
+              type: 'json-parse',
+              message: `${parseError.message}; retry API failed: ${retryError.message}`,
+            });
+            recordImageResult({
+              storeId,
+              imageId,
+              validProductsCount: 0,
+              source: 'parse-failed',
+            });
+          }
+        }
       }
 
     } catch (error) {
@@ -2031,6 +2278,20 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
         console.error("[formatDataToJson] Possible issue: Incorrect file type or URL for Gemini Vision input.");
       }
       allMessages.push(`[formatDataToJson] Gemini API Error for image #${i + 1}: ${error.message}`);
+
+      recordError({
+        storeId,
+        imageId,
+        type: 'gemini-api',
+        message: error.message,
+      });
+
+      recordImageResult({
+        storeId,
+        imageId,
+        validProductsCount: 0,
+        source: 'api-failed',
+      });
     }
   }
 
@@ -2043,7 +2304,7 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 // ...existing code...
 
 // **UPDATED** formatDataToJson function to work with image URL
- 
+
 
 
 
@@ -2079,8 +2340,8 @@ app.get('/test', async (req, res) => {
 
 app.get("/getStores", (req, res) => {
   const q = `SELECT * from stores WHERE facebookPageId > 0 and active = true order by storeId asc`;
-  const userId= req.query.userId;
-    db.query(q, (err, data) => {
+  const userId = req.query.userId;
+  db.query(q, (err, data) => {
     if (err) {
       console.log("getStores error:", err);
       return res.json(err);
@@ -2093,8 +2354,8 @@ app.get("/getStores", (req, res) => {
 
 app.get("/getFaceBookStores", (req, res) => {
   const q = `SELECT * from stores order by storeId WHERE facebookPageId NOT NULL asc`;
-  const userId= req.query.userId;
-    db.query(q, (err, data) => {
+  const userId = req.query.userId;
+  db.query(q, (err, data) => {
     if (err) {
       console.log("getStores error:", err);
       return res.json(err);
@@ -2140,20 +2401,20 @@ app.get("/isFavorite", async (req, res) => { // Added async
       : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
 
   if (!numericUserId || !Number.isFinite(productId) || productId <= 0) {
-     // Cannot check favorite without user and product ID
-     // Technically could check productId only, but usually it's user-specific
-     return res.status(200).json({ isFavorite: false }); // Return false if no user or product ID
+    // Cannot check favorite without user and product ID
+    // Technically could check productId only, but usually it's user-specific
+    return res.status(200).json({ isFavorite: false }); // Return false if no user or product ID
   }
 
   // Schema-agnostic: favorites table may not have a favoriteId column.
   const q = `SELECT 1 FROM favorites WHERE userId = ? AND productId = ? LIMIT 1`;
   try {
-      const result = await queryPromise(q, [numericUserId, productId]);
-      const isFavorite = result.length > 0;
-      res.status(200).json({ isFavorite });
+    const result = await queryPromise(q, [numericUserId, productId]);
+    const isFavorite = result.length > 0;
+    res.status(200).json({ isFavorite });
   } catch (err) {
-      console.error('Error checking favorite:', err);
-      return res.status(500).json({ error: 'Failed to check favorite status' });
+    console.error('Error checking favorite:', err);
+    return res.status(500).json({ error: 'Failed to check favorite status' });
   }
 });
 
@@ -2166,7 +2427,7 @@ app.post('/register-push-token', identifyUserMiddleware, async (req, res) => {
   //const userId = req.identifiedUser?.id;
   const userId = req.identifiedUser?.userId;
 
-    console.log(`[Push] Attempting to register token for user ID: ${userId}`);
+  console.log(`[Push] Attempting to register token for user ID: ${userId}`);
 
   if (!userId || !token) {
     return res.status(400).json({ error: 'User ID and token are required.' });
@@ -2205,11 +2466,12 @@ app.get('/user/preferences', async (req, res) => {
     if (!user) {
       return res.status(404).json({ error: 'User not found.' });
     }
-    res.json({ 
+    res.json({
       firstName: user.first_name,
       lastName: user.last_name,
       email: user.email,
-      notificationFrequency: user.notification_frequency });
+      notificationFrequency: user.notification_frequency
+    });
   } catch (err) {
     console.error('[API] Error getting user preferences:', err);
     res.status(500).json({ error: 'Failed to get preferences.' });
@@ -2251,11 +2513,11 @@ app.get('/user/profile', async (req, res) => {
     if (!user) {
       return res.status(404).json({ error: 'User not found.' });
     }
-    res.json({ 
+    res.json({
       firstName: user.first_name,
       lastName: user.last_name,
       email: user.email,
-      notificationFrequency: user.notification_frequency 
+      notificationFrequency: user.notification_frequency
     });
   } catch (err) {
     console.error('[API] Error getting user profile:', err);
@@ -2268,7 +2530,7 @@ app.put('/user/profile', async (req, res) => {
   if (!req.identifiedUser?.userId) {
     return res.status(401).json({ error: 'User identification required.' });
   }
-  
+
   const { firstName, lastName, email, notificationFrequency } = req.body;
   const validFrequencies = ['daily', 'weekly', 'monthly', 'off'];
 
@@ -2283,10 +2545,10 @@ app.put('/user/profile', async (req, res) => {
       WHERE id = ?
     `;
     await queryPromise(q, [
-      firstName, 
-      lastName, 
-      email, 
-      notificationFrequency, 
+      firstName,
+      lastName,
+      email,
+      notificationFrequency,
       req.identifiedUser.userId
     ]);
     res.json({ message: 'Profile updated successfully.' });
@@ -2310,7 +2572,7 @@ app.post('/test-push', async (req, res) => {
   try {
     // 1. Get the push tokens for the specified user
     const tokenResults = await queryPromise('SELECT token FROM push_tokens WHERE user_id = ?', [userId]);
-    
+
     if (tokenResults.length === 0) {
       console.log(`[Push Test] No push tokens found for User ID: ${userId}`);
       return res.status(404).json({ message: 'No push tokens found for this user.' });
@@ -2406,7 +2668,7 @@ app.post("/addFavorite", async (req, res) => { // Added async
 
   console.log('Add favorite endpoint hit...');
 
-  
+
   // The user MUST be identified by the middleware to add a favorite.
   if (!req.identifiedUser || !req.identifiedUser.userId) {
     console.error('[API] Error: User identification is required to add a favorite.');
@@ -2472,13 +2734,13 @@ app.post("/addFavorite", async (req, res) => { // Added async
   `;
 
   try {
-      const result = await queryPromise(q, [numericUserId, productId, numericUserId, productId]);
-      const added = Boolean(result?.affectedRows);
-      console.log(`[API] Favorite ${added ? 'added' : 'already existed'} for User ID: ${numericUserId} and Product ID: ${productId}. DB result:`, result);
-      res.status(200).json({ message: added ? 'Favorite added successfully' : 'Favorite already exists', added });
+    const result = await queryPromise(q, [numericUserId, productId, numericUserId, productId]);
+    const added = Boolean(result?.affectedRows);
+    console.log(`[API] Favorite ${added ? 'added' : 'already existed'} for User ID: ${numericUserId} and Product ID: ${productId}. DB result:`, result);
+    res.status(200).json({ message: added ? 'Favorite added successfully' : 'Favorite already exists', added });
   } catch (err) {
-       console.error('Error adding favorite:', err);
-       return res.status(500).json({ error: 'Failed to add favorite' });
+    console.error('Error adding favorite:', err);
+    return res.status(500).json({ error: 'Failed to add favorite' });
   }
 });
 
@@ -2507,12 +2769,12 @@ app.delete("/removeFavorite", async (req, res) => { // Added async
 
   const q = `DELETE FROM favorites WHERE userId = ? AND productId = ?`;
   try {
-      await queryPromise(q, [numericUserId, productId]);
-      console.log(`[API] Favorite removed for User ID: ${numericUserId} and Product ID: ${productId}`);
-      res.status(200).json({ message: 'Favorite removed successfully' });
+    await queryPromise(q, [numericUserId, productId]);
+    console.log(`[API] Favorite removed for User ID: ${numericUserId} and Product ID: ${productId}`);
+    res.status(200).json({ message: 'Favorite removed successfully' });
   } catch (err) {
-       console.error('Error removing favorite:', err);
-       return res.status(500).json({ error: 'Failed to remove favorite' });
+    console.error('Error removing favorite:', err);
+    return res.status(500).json({ error: 'Failed to remove favorite' });
   }
 });
 
@@ -2523,8 +2785,8 @@ app.delete("/removeFavorite", async (req, res) => { // Added async
 
 app.get("/getUsers", (req, res) => {
   const q = `SELECT * from users order by userId asc`;
-  const userId= req.query.userId;
-    db.query(q, (err, data) => {
+  const userId = req.query.userId;
+  db.query(q, (err, data) => {
     if (err) {
       console.log("getStores error:", err);
       return res.json(err);
@@ -2854,7 +3116,7 @@ app.get("/getProducts", async (req, res) => {
     const data = await queryPromise(q, finalParams);
     const nextPage = data.length === limit ? page + 1 : null;
     return res.json({ data, nextPage });
-  } catch(err) {
+  } catch (err) {
     console.log("getProducts error:", err);
     return res.status(500).json({ error: "Failed to retrieve products" });
   }
@@ -2973,21 +3235,21 @@ app.get("/getProductsDashboard", async (req, res) => {
 
 
 app.delete('/delete-image', async (req, res) => {
-    const { public_id } = req.body;
-    if (!public_id) {
-      return res.status(400).json({ error: 'Missing public_id' });
+  const { public_id } = req.body;
+  if (!public_id) {
+    return res.status(400).json({ error: 'Missing public_id' });
+  }
+  try {
+    const result = await cloudinary.uploader.destroy(public_id);
+    if (result.result === 'ok') {
+      res.status(200).json({ message: 'Image deleted successfully' });
+    } else {
+      res.status(500).json({ error: 'Failed to delete image' });
     }
-    try {
-      const result = await cloudinary.uploader.destroy(public_id);
-      if (result.result === 'ok') {
-        res.status(200).json({ message: 'Image deleted successfully' });
-      } else {
-        res.status(500).json({ error: 'Failed to delete image' });
-      }
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 
 
@@ -3091,23 +3353,112 @@ app.post('/trigger-daily-ingest', async (req, res) => {
   const label = storeIds.length > 0 ? `stores [${storeIds.join(', ')}]` : 'all active stores';
   console.log(`[Manual] Daily ingest triggered for ${label}.`);
   res.status(202).json({ message: `Daily ingest started for ${label}. Check server logs for progress.` });
-  try {
-    await runDailyIngest(formatDataToJson, storeIds);
-  } catch (err) {
-    console.error('[Manual] Daily ingest error:', err.message);
-  }
+
+  // Run the ingestion asynchronously in background
+  (async () => {
+    let jobLogId = null;
+    try {
+      const startResult = await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+        'manual-daily-ingest',
+        'started',
+        `Manual daily ingest triggered for ${label}.`
+      ]);
+      jobLogId = startResult.insertId;
+
+      const storeSummaries = await runDailyIngest(formatDataToJson, storeIds);
+
+      await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+        'manual-daily-ingest',
+        'success',
+        `Manual daily ingest completed successfully for ${label}.`
+      ]);
+
+      // Persist per-store summaries
+      if (jobLogId && Array.isArray(storeSummaries)) {
+        for (const s of storeSummaries) {
+          await queryPromise(
+            'INSERT INTO ingest_store_logs (job_log_id, store_id, posts_fetched, images_discovered, images_uploaded, images_with_products, products_inserted, errors) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+              jobLogId,
+              s.storeId,
+              s.postsFetched,
+              s.imagesDiscovered,
+              s.imagesUploaded,
+              s.imagesWithProducts,
+              s.productsInserted,
+              s.errors.length > 0 ? JSON.stringify(s.errors) : null,
+            ]
+          );
+        }
+      }
+    } catch (err) {
+      console.error('[Manual] Daily ingest error:', err.message);
+      try {
+        await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+          'manual-daily-ingest',
+          'failed',
+          `Error for ${label}: ${err.message}`
+        ]);
+      } catch (dbErr) {
+        console.error('[Manual] Failed to log failure to database:', dbErr.message);
+      }
+    }
+  })();
 });
 
 // Automatic daily ingest at noon (12:00) server time
 cron.schedule('0 12 * * *', async () => {
   console.log('[Cron] Noon trigger fired — starting daily ingest...');
+  let jobLogId = null;
   try {
-    await runDailyIngest(formatDataToJson);
+    const startResult = await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+      'daily-ingest',
+      'started',
+      'Daily noon ingest cron job triggered.'
+    ]);
+    jobLogId = startResult.insertId;
+
+    const storeSummaries = await runDailyIngest(formatDataToJson);
+
+    await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+      'daily-ingest',
+      'success',
+      'Daily noon ingest completed successfully.'
+    ]);
+
+    // Persist per-store summaries
+    if (jobLogId && Array.isArray(storeSummaries)) {
+      for (const s of storeSummaries) {
+        await queryPromise(
+          'INSERT INTO ingest_store_logs (job_log_id, store_id, posts_fetched, images_discovered, images_uploaded, images_with_products, products_inserted, errors) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            jobLogId,
+            s.storeId,
+            s.postsFetched,
+            s.imagesDiscovered,
+            s.imagesUploaded,
+            s.imagesWithProducts,
+            s.productsInserted,
+            s.errors.length > 0 ? JSON.stringify(s.errors) : null,
+          ]
+        );
+      }
+    }
   } catch (err) {
     console.error('[Cron] Daily ingest failed:', err.message);
+    try {
+      await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+        'daily-ingest',
+        'failed',
+        err.message
+      ]);
+    } catch (dbErr) {
+      console.error('[Cron] Failed to log failure to database:', dbErr.message);
+    }
   }
 });
 console.log('[Cron] Daily noon ingest scheduler registered.');
+
 
 const port = process.env.PORT || 3000;
 
@@ -3126,6 +3477,43 @@ async function checkGeminiModel() {
   }
 }
 
+async function initializeDatabaseTables() {
+  const jobLogsQuery = `
+    CREATE TABLE IF NOT EXISTS \`job_logs\` (
+      \`id\` INT NOT NULL AUTO_INCREMENT,
+      \`job_name\` VARCHAR(100) NOT NULL,
+      \`status\` VARCHAR(50) NOT NULL,
+      \`message\` TEXT DEFAULT NULL,
+      \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (\`id\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+  `;
+  const ingestStoreLogsQuery = `
+    CREATE TABLE IF NOT EXISTS \`ingest_store_logs\` (
+      \`id\` INT NOT NULL AUTO_INCREMENT,
+      \`job_log_id\` INT NOT NULL,
+      \`store_id\` INT NOT NULL,
+      \`posts_fetched\` INT DEFAULT 0,
+      \`images_discovered\` INT DEFAULT 0,
+      \`images_uploaded\` INT DEFAULT 0,
+      \`images_with_products\` INT DEFAULT 0,
+      \`products_inserted\` INT DEFAULT 0,
+      \`errors\` TEXT DEFAULT NULL,
+      \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (\`id\`),
+      CONSTRAINT \`fk_ingest_store_logs_job_logs\` FOREIGN KEY (\`job_log_id\`) REFERENCES \`job_logs\` (\`id\`) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+  `;
+  try {
+    await queryPromise(jobLogsQuery);
+    console.log('✅ [Database] job_logs table initialized successfully (or already exists).');
+    await queryPromise(ingestStoreLogsQuery);
+    console.log('✅ [Database] ingest_store_logs table initialized successfully (or already exists).');
+  } catch (err) {
+    console.error('❌ [Database] Failed to initialize database tables:', err.message);
+  }
+}
+
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
   // console log the ip address of the machine
@@ -3137,5 +3525,6 @@ app.listen(port, () => {
       }
     }
   }
+  initializeDatabaseTables();
   checkGeminiModel();
 });

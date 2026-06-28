@@ -34,3 +34,4 @@ meniven-web-firebase-adminsdk-fbsvc-9a3503673e.json
 *.sw?
 *.p8
 keys/meniven-web-firebase-adminsdk-*.json
+schema/*
