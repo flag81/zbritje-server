@@ -1,5 +1,6 @@
 import { v2 as cloudinary } from 'cloudinary';
 import dotenv from 'dotenv';
+import logger from '../services/logger.js';
 
 dotenv.config();
 
@@ -9,6 +10,6 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-console.log('✅ Cloudinary configured.');
+logger.info('✅ Cloudinary configured.');
 
 export default cloudinary;

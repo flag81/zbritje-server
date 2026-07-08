@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import JSON5 from 'json5';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import logger from './logger.js';
 
 // --- Configuration ---
 const __filename = fileURLToPath(import.meta.url);
@@ -9,7 +10,7 @@ const __dirname = path.dirname(__filename);
 
 // Initialize Standard Google AI Studio SDK Client
 const aiStudio = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const model = 'gemini-2.5-flash';
+const model = 'gemini-2.5-flash-lite';
 
 const MAX_RETRIES = 3;
 
@@ -75,46 +76,47 @@ Now, analyze the following image and provide the JSON output in the specified fo
  * @returns {Promise<Array>} A promise that resolves to an array of product objects.
  */
 export const extractProductsFromImage = async (imageUrl, metadata) => {
-    const prompt = buildPrompt({ ...metadata, timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ') });
+  const prompt = buildPrompt({ ...metadata, timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ') });
 
-    const imagePart = {
-        inlineData: {
-            mimeType: 'image/jpeg',
-            data: Buffer.from(await fetch(imageUrl).then(res => res.arrayBuffer())).toString("base64"),
+  const imagePart = {
+    inlineData: {
+      mimeType: 'image/jpeg',
+      data: Buffer.from(await fetch(imageUrl).then((res) => res.arrayBuffer())).toString('base64'),
+    },
+  };
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      logger.info(`[Gemini] Sending request for imageId: ${metadata.imageId} (Attempt ${attempt})`);
+      const result = await aiStudio.models.generateContent({
+        model: model,
+        contents: [prompt, imagePart],
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
         },
-    };
+      });
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-            console.log(`[Gemini] Sending request for imageId: ${metadata.imageId} (Attempt ${attempt})`);
-            const result = await aiStudio.models.generateContent({
-                model: model,
-                contents: [prompt, imagePart],
-                config: {
-                    responseMimeType: 'application/json',
-                    temperature: 0.1,
-                }
-            });
-            
-            const responseText = result.text;
-            const parsedJson = JSON5.parse(responseText);
+      const responseText = result.text;
+      const parsedJson = JSON5.parse(responseText);
 
-            if (parsedJson && Array.isArray(parsedJson.products)) {
-                console.log(`[Gemini] Successfully extracted ${parsedJson.products.length} products for imageId: ${metadata.imageId}.`);
-                return parsedJson.products;
-            }
-            
-            console.warn(`[Gemini] Parsed JSON but 'products' array is missing or invalid for imageId: ${metadata.imageId}.`);
-            return []; // Return empty array if structure is not expected
+      if (parsedJson && Array.isArray(parsedJson.products)) {
+        logger.info(
+          `[Gemini] Successfully extracted ${parsedJson.products.length} products for imageId: ${metadata.imageId}.`,
+        );
+        return parsedJson.products;
+      }
 
-        } catch (error) {
-            console.error(`[Gemini] API Error on attempt ${attempt} for image ${metadata.imageId}:`, error.message);
-            if (attempt === MAX_RETRIES) {
-                throw new Error(`Failed to extract data from Gemini API after ${MAX_RETRIES} attempts.`);
-            }
-            // Wait before retrying (e.g., exponential backoff)
-            await new Promise(res => setTimeout(res, 1000 * attempt));
-        }
+      logger.warn(`[Gemini] Parsed JSON but 'products' array is missing or invalid for imageId: ${metadata.imageId}.`);
+      return []; // Return empty array if structure is not expected
+    } catch (error) {
+      logger.error(`[Gemini] API Error on attempt ${attempt} for image ${metadata.imageId}:`, error.message);
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`Failed to extract data from Gemini API after ${MAX_RETRIES} attempts.`);
+      }
+      // Wait before retrying (e.g., exponential backoff)
+      await new Promise((res) => setTimeout(res, 1000 * attempt));
     }
-    return []; // Should not be reached, but as a fallback
+  }
+  return []; // Should not be reached, but as a fallback
 };

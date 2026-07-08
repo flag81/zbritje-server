@@ -1,4 +1,5 @@
 import { queryPromise } from '../dbUtils.js';
+import logger from '../services/logger.js';
 
 export const getJobLogs = async (req, res) => {
   const page = parseInt(req.query.page, 10) || 1;
@@ -38,7 +39,7 @@ export const getJobLogs = async (req, res) => {
 
     res.json({ data, total, page, limit });
   } catch (err) {
-    console.error('getJobLogs error:', err);
+    logger.error('getJobLogs error:', err);
     res.status(500).json({ error: 'Failed to retrieve job logs' });
   }
 };

@@ -1,5 +1,6 @@
 // In connection.js or a new utils/dbUtils.js
 import db from './connection.js'; // Your existing db connection
+import logger from './services/logger.js';
 
 /**
  * Executes a SQL query using the database connection pool and returns a Promise.
@@ -11,7 +12,7 @@ function queryPromise(sql, params) {
   return new Promise((resolve, reject) => {
     db.query(sql, params, (err, results) => {
       if (err) {
-        console.error("Database Query Error:", err);
+        logger.error('Database Query Error:', err);
         return reject(err);
       }
       resolve(results);

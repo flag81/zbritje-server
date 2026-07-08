@@ -1,253 +1,95 @@
-import multer from 'multer';
-import cloudinary from './cloudinaryConfig.js';
-import cors from 'cors';
-import fs from 'fs';
 import dotenv from 'dotenv';
-import { sendDailyProductNotifications } from './notificationScheduler.js';
-import { runDailyIngest } from './ingestScheduler.js';
-import cron from 'node-cron';
-import os from 'os'; // <-- FIX: Import the 'os' module
-import webPushPkg from 'web-push';
-const webPush = webPushPkg && webPushPkg.default ? webPushPkg.default : webPushPkg;
-import { corsDelegate } from './config/cors.js';
-
-import { Expo } from 'expo-server-sdk'; // 1. IMPORT THE SDK
-
 dotenv.config();
 
 import express from 'express';
-
-import { fileURLToPath } from "url";
-import path from "path";
-
-// We no longer need the Google Vision client if extracting directly from image
-// import vision from '@google-cloud/vision';
-
-import JSON5 from 'json5';
-
-const allMessages = [];
-
-const INGEST_DRY_RUN_DEFAULT = String(process.env.INGEST_DRY_RUN || '').toLowerCase() === 'true';
-const INGEST_STORE_IDS_DEFAULT = String(process.env.INGEST_STORE_IDS || '')
-  .split(',')
-  .map(id => parseInt(id.trim(), 10))
-  .filter(Number.isFinite);
-
-function parseBooleanFlag(value, fallback = false) {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
-    if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
-  }
-  return fallback;
-}
-
-function flattenFacebookPostsToItems(posts) {
-  const items = [];
-  posts.forEach((post) => {
-    (post.images || []).forEach((imgObj) => {
-      items.push({
-        postId: post.postId,
-        message: post.message,
-        created_time: post.created_time,
-        uri: imgObj.uri,
-        image: imgObj.uri,
-        imageData: post.imageData,
-        imageId: imgObj.id,
-        timestamp: post.timestamp,
-      });
-    });
-  });
-  return items;
-}
-
-
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import bodyParser from 'body-parser';
+import session from 'express-session';
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+import cron from 'node-cron';
+import os from 'os';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import webPushPkg from 'web-push';
+const webPush = webPushPkg && webPushPkg.default ? webPushPkg.default : webPushPkg;
+import db from './connection.js';
+import { queryPromise } from './dbUtils.js';
+import { corsDelegate } from './config/cors.js';
+import identifyUserMiddleware from './identifyUserMiddleware.js';
+import { runDailyIngest } from './ingestScheduler.js';
+import { formatDataToJson, extractSaleEndDateFromImage } from './services/aiService.js';
+import { pollGeminiBatches } from './services/geminiBatchIngestService.js';
+import { ensureAnonUserRow, handleInitialize } from './services/userService.js';
+import { flattenFacebookPostsToItems } from './services/facebookService.js';
+import { listAllMediaFiles } from './services/cloudinaryService.js';
+import { subscribeWebPush, triggerAllWebPushNotifications } from './services/notificationService.js';
+import {
+  testPushNotification,
+  triggerUserNotifications,
+  triggerAllUserExpoNotifications,
+  registerPushToken,
+} from './controllers/notificationController.js';
+import {
+  getFacebookPhotos,
+  getFacebookPostsHandler,
+  getFacebookPhotosViaApify,
+} from './controllers/facebookController.js';
+import { ingestStoreDryRun, triggerDailyIngest, pollGeminiBatchesNow } from './controllers/ingestionController.js';
+import { extractTextSingle } from './controllers/extractionController.js';
+import { sendDailyProductNotifications } from './notificationScheduler.js';
+import { errorHandler } from './middleware/errorHandler.js';
+import logger from './services/logger.js';
+import { requestLogger } from './middleware/requestLogger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const keyFilePath = path.join(__dirname, './persistent/keys/vision-ai-455010-6d2a9944437b.json'); // Ensure this path is correct for your service account key
-
-process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
-
-if (!fs.existsSync(keyFilePath)) {
-  console.error('❌ Key file not found:', keyFilePath);
-}
-else {
-  console.log('✅ Key file found:', keyFilePath);
-}
-
-// No longer need to parse credentials here unless used elsewhere
-// const credentials = JSON.parse(fs.readFileSync(keyFilePath, 'utf8'));
-
-
-console.log('GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID ? 'Loaded' : 'Not set');
-console.log('GOOGLE_CLIENT_SECRET:', process.env.GOOGLE_CLIENT_SECRET ? 'Loaded' : 'Not set');
-
-
-import { GoogleGenAI } from '@google/genai';
-
-// Initialize Standard Google AI Studio SDK Client
-const aiStudio = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-console.log('✅ Google AI Studio client initialized in server.js');
-
-
-// Load private key for Apple authentication (keeping this as it seems unrelated to image extraction)
-const privateKeyPath = path.join(__dirname, "./persistent/keys/AuthKey_6YK9NFRYH9.p8"); // Path to your .p8 key file
-const privateKey = fs.readFileSync(privateKeyPath, "utf8");
-
-// We no longer need the Google Vision client instance
-// const client = new vision.ImageAnnotatorClient({
-//   keyFilename: path.join(__dirname, './persistent/keys/vision-ai-455010-6d2a9944437b.json'), // Replace with your key file path
-// });
-
-
-import { ApifyClient } from 'apify-client';
-
-
-// Initialize Apify client with your token
-const apify = new ApifyClient({
-  token: process.env.APIFY_TOKEN  // Replace with your Apify API token
-});
-
-
-console.log('✅ Apify client initialized in server.js');
-
-import { format } from 'path';
-import db from './connection.js';
-import { queryPromise } from './dbUtils.js';
-import { fetchFacebookPosts } from './rapidApi.js';
-
-
-import cookieParser from 'cookie-parser';
-import bodyParser from 'body-parser';
-import identifyUserMiddleware from './identifyUserMiddleware.js';
-
-import AppleSigninAuth from 'apple-signin-auth';
-
-
-
-import download, { image } from 'image-downloader';
-
+// =========================================================================
+// APP SETUP
+// =========================================================================
 export const app = express();
 
-
-import jwt from 'jsonwebtoken';
-
-
-
-import passport from 'passport';
-import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
-import { Strategy as AppleStrategy } from 'passport-apple';
-
-import session from 'express-session';
-import axios, { all } from "axios";
-
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Supports form data parsing
+app.use(express.urlencoded({ extended: true }));
 app.use(cors(corsDelegate));
 app.options('*', cors(corsDelegate));
 
-// Configure VAPID for web-push.
-// In production, missing keys should NOT crash the entire API.
-const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
-const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
-const vapidAdminEmail = process.env.VAPID_ADMIN_EMAIL || 'admin@example.com';
-const webPushEnabled = Boolean(vapidPublicKey && vapidPrivateKey);
-
-if (webPushEnabled) {
-  webPush.setVapidDetails(`mailto:${vapidAdminEmail}`, vapidPublicKey, vapidPrivateKey);
-  console.log('✅ web-push VAPID configured');
-} else {
-  console.warn('⚠️ web-push disabled: missing VAPID_PUBLIC_KEY and/or VAPID_PRIVATE_KEY');
-}
-
-// Endpoint to receive push subscription objects from clients
-app.post('/subscribe-webpush', async (req, res) => {
-  if (!webPushEnabled) {
-    return res.status(503).json({
-      error: 'Web push is not configured on the server (missing VAPID keys).',
-    });
-  }
-  try {
-    const { subscription, userId } = req.body;
-    if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
-
-
-
-    const q = `INSERT INTO subscriptions (endpoint, subscription, userId) VALUES (?, ?, ?)
-               ON DUPLICATE KEY UPDATE subscription = ?`;
-    db.query(q, [subscription.endpoint, JSON.stringify(subscription), userId || null, JSON.stringify(subscription)], (err) => {
-      if (err) {
-        console.error('DB save subscription error:', err);
-        return res.status(500).json({ error: 'DB error' });
-      }
-      res.json({ success: true });
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-
-// Trigger notifications to all stored subscriptions
-app.post('/trigger-all-user-notifications', async (req, res) => {
-  if (!webPushEnabled) {
-    return res.status(503).json({
-      error: 'Web push is not configured on the server (missing VAPID keys).',
-    });
-  }
-  try {
-    const q = `SELECT subscription FROM subscriptions`;
-    db.query(q, async (err, results) => {
-      if (err) {
-        console.error('DB fetch subscriptions error:', err);
-        return res.status(500).json({ error: 'DB error' });
-      }
-      const payload = {
-        title: req.body.title || 'Meniven',
-        body: req.body.body || 'Notification from server',
-        icon: req.body.icon || '/icon.png',
-        url: req.body.url || process.env.FRONTEND_URL || '/'
-      };
-
-      const sendPromises = results.map(row => {
-        const sub = JSON.parse(row.subscription);
-        return webPush.sendNotification(sub, JSON.stringify(payload)).catch(e => {
-          console.error('sendNotification error:', e);
-        });
-      });
-
-      await Promise.all(sendPromises);
-      res.json({ success: true, sent: results.length });
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-
+// CSP
 app.use((req, res, next) => {
-  res.setHeader("Content-Security-Policy",
-    "script-src 'self' https://singular-catfish-deciding.ngrok-free.app https://www.apple.com https://appleid.cdn-apple.com https://idmsa.apple.com https://gsa.apple.com https://idmsa.apple.com.cn https://signin.apple.com;"
+  res.setHeader(
+    'Content-Security-Policy',
+    "script-src 'self' https://singular-catfish-deciding.ngrok-free.app https://www.apple.com https://appleid.cdn-apple.com https://idmsa.apple.com https://gsa.apple.com https://idmsa.apple.com.cn https://signin.apple.com;",
   );
   next();
 });
 
-app.use(session({
-  secret: process.env.SESSION_SECRET, resave: false, saveUninitialized: true,
+// Session
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: true,
+    cookie: { maxAge: 5 * 60 * 1000, secure: process.env.NODE_ENV === 'production' },
+  }),
+);
 
-  cookie: {
-    maxAge: 5 * 60 * 1000, // Set session duration
-    secure: process.env.NODE_ENV === 'production', // Set secure cookies in production
-  }
+// Cookie & body parsing
+app.use(cookieParser());
+app.use(bodyParser.json());
 
-}));
+// Request logging (adds req.log and req.reqId)
+app.use(requestLogger);
 
-
+// =========================================================================
+// GOOGLE OAUTH SETUP
+// =========================================================================
+const keyFilePath = path.join(__dirname, './persistent/keys/vision-ai-455010-6d2a9944437b.json');
+process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
 
 if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   passport.use(
@@ -255,676 +97,143 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
       {
         clientID: process.env.GOOGLE_CLIENT_ID,
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: "http://localhost:3000/auth/google/callback",
+        callbackURL: 'http://localhost:3000/auth/google/callback',
         passReqToCallback: true,
       },
-      (req, accessToken, refreshToken, profile, done) => {
-        return done(null, profile);
-      }
-    )
+      (req, accessToken, refreshToken, profile, done) => done(null, profile),
+    ),
   );
-} else {
-  console.warn('⚠️ Google OAuth disabled: missing GOOGLE_CLIENT_ID and/or GOOGLE_CLIENT_SECRET');
 }
 
-
-// Serialize and deserialize user (use sessions)
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
-
-// Initialize passport and session middleware
 app.use(passport.initialize());
 app.use(passport.session());
 
+// =========================================================================
+// VAPID WEB PUSH SETUP
+// =========================================================================
+const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
+const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
+const vapidAdminEmail = process.env.VAPID_ADMIN_EMAIL || 'admin@example.com';
+const webPushEnabled = Boolean(vapidPublicKey && vapidPrivateKey);
+if (webPushEnabled) {
+  webPush.setVapidDetails(`mailto:${vapidAdminEmail}`, vapidPublicKey, vapidPrivateKey);
+}
 
-//
-
-
-
-
-// Apple Sign-In Route (keeping these as they are authentication related)
-
-
-
-
-const generateAppleClientSecret = () => {
-  const now = Math.floor(Date.now() / 1000);
-  return jwt.sign(
-    {
-      iss: process.env.APPLE_TEAM_ID,
-      iat: now,
-      exp: now + 15777000, // Token valid for 6 months
-      aud: "https://appleid.apple.com",
-      sub: process.env.APPLE_CLIENT_ID,
-    },
-    privateKey,
-    {
-      algorithm: "ES256",
-      keyid: process.env.APPLE_KEY_ID,
-    }
-  );
-};
-
-
-app.post("/auth/apple", async (req, res) => {
-  try {
-    const { code } = req.body;
-    const clientSecret = generateAppleClientSecret();
-    const appleResponse = await AppleSigninAuth.getAuthorizationToken(code, {
-      clientID: process.env.APPLE_CLIENT_ID,
-      clientSecret: clientSecret,
-      redirectURI: process.env.APPLE_CALLBACK_URL,
-    });
-    const decodedToken = jwt.decode(appleResponse.id_token);
-    res.json({ user: decodedToken, accessToken: appleResponse.access_token });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Apple Sign-in failed" });
-  }
-});
-
-app.post("/auth/apple/callback", async (req, res) => {
-  try {
-    console.log("🍏 Apple OAuth Callback Triggered");
-    const { code, id_token } = req.body;
-
-    if (!code && !id_token) {
-      console.error("❌ No authorization code or ID token received.");
-      return res.status(400).json({ error: "Missing Apple authorization data" });
-    }
-
-    let decodedToken;
-    if (id_token) {
-      decodedToken = jwt.decode(id_token);
-    } else {
-      const clientSecret = generateAppleClientSecret();
-      const appleResponse = await axios.post("https://appleid.apple.com/auth/token", null, {
-        params: {
-          client_id: process.env.APPLE_CLIENT_ID,
-          client_secret: clientSecret,
-          code: code,
-          grant_type: "authorization_code",
-          redirect_uri: process.env.APPLE_CALLBACK_URL,
-        },
-      });
-
-      if (!appleResponse.data.id_token) {
-        console.error("❌ Failed to retrieve Apple ID token.");
-        return res.status(400).json({ error: "Failed to authenticate with Apple" });
-      }
-      decodedToken = jwt.decode(appleResponse.data.id_token);
-    }
-
-    if (!decodedToken) {
-      console.error("❌ Failed to decode Apple ID token.");
-      return res.status(400).json({ error: "Invalid Apple ID token" });
-    }
-
-    const appleId = decodedToken.sub;
-    let email = decodedToken.email || null;
-
-    console.log(`🍏 Received AppleID: ${appleId}, Email: ${email || "No email provided"}`);
-
-    const checkQuery = `SELECT userId, email FROM users WHERE userId = ? OR email = ?`;
-    db.query(checkQuery, [appleId, email], (err, results) => {
-      if (err) {
-        console.error("❌ Database error:", err);
-        return res.status(500).json({ error: "Database error" });
-      }
-
-      if (results.length > 0) {
-        const existingUser = results[0];
-        console.log(`✅ Existing user found: userId=${existingUser.userId}, email=${existingUser.email || "No email"}`);
-
-        if (!existingUser.email && email) {
-          const updateQuery = `UPDATE users SET email = ? WHERE userId = ?`;
-          db.query(updateQuery, [email, existingUser.userId], (updateErr) => {
-            if (updateErr) {
-              console.error("❌ Error updating email:", updateErr);
-              return res.status(500).json({ error: "Failed to update email" });
-            }
-            console.log(`✅ Email updated for userId=${existingUser.userId}`);
-          });
-        }
-
-        const token = jwt.sign(
-          { userId: existingUser.userId, email: existingUser.email || email },
-          process.env.TOKEN_SECRET,
-          { expiresIn: "7d" }
-        );
-
-        res.cookie("jwt", token, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "None",
-          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-        });
-
-        return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
-      } else {
-        console.log(`🆕 New user detected, inserting: ${email || "No email provided"}`);
-        const insertQuery = `INSERT INTO users (first_name, email) VALUES (?, ?)`;
-        db.query(insertQuery, [appleId, email], (insertErr) => {
-          if (insertErr) {
-            console.error("❌ Error inserting new user:", insertErr);
-            return res.status(500).json({ error: "Failed to insert new user" });
-          }
-
-          console.log(`✅ New user inserted: AppleID=${appleId}, Email=${email || "No email"}`);
-          const token = jwt.sign(
-            { userId: appleId, email },
-            process.env.TOKEN_SECRET,
-            { expiresIn: "7d" }
-          );
-
-          res.cookie("jwt", token, {
-            httpOnly: true,
-            secure: true,
-            sameSite: "None",
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-          });
-
-          return res.redirect(`${process.env.FRONTEND_URL}?loginSuccess=true`);
-        });
-      }
-    });
-  } catch (error) {
-    console.error("❌ Apple OAuth Error:", error);
-    return res.status(500).json({ error: "Apple authentication failed" });
-  }
-});
-
-
-
-// Specify the model you want to use (e.g., Gemini 1.5 Pro)
-//const model = 'gemini-2.5-pro'; // Updated to Gemini 2.5 Pro
-
-const model = 'gemini-2.5-flash';
-
-// Access the generative model for AI Studio
-const generativeModel = aiStudio.models;
-
-
-
-// CORS is configured once near app initialization.
-app.use(cookieParser());
-app.use(bodyParser.json());
-
+// =========================================================================
+// USER IDENTIFICATION MIDDLEWARE
+// =========================================================================
 app.use(identifyUserMiddleware);
 
+// =========================================================================
+// EXISTING ROUTED ENDPOINTS (already in route files)
+// =========================================================================
+import authRoutes from './routes/authRoutes.js';
+import jobLogRoutes from './routes/jobLogRoutes.js';
+import userRoutes from './routes/userRoutes.js';
+import flyerRoutes from './routes/flyerRoutes.js';
+import productRoutes from './routes/productRoutes.js';
+import storeRoutes from './routes/storeRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
+import facebookRoutes from './routes/facebookRoutes.js';
+import cloudinaryRoutes from './routes/cloudinaryRoutes.js';
+import ingestionRoutes from './routes/ingestionRoutes.js';
+import extractionRoutes from './routes/extractionRoutes.js';
+import searchRoutes from './routes/searchRoutes.js';
+app.use('/auth', authRoutes);
+app.use('/job-logs', jobLogRoutes);
+app.use('/user', userRoutes);
+app.use('/flyers', flyerRoutes);
+app.use('/products', productRoutes);
+app.use('/stores', storeRoutes);
+app.use('/notifications', notificationRoutes);
+app.use('/facebook', facebookRoutes);
+app.use('/cloudinary', cloudinaryRoutes);
+app.use('/ingestion', ingestionRoutes);
+app.use('/extraction', extractionRoutes);
+app.use(searchRoutes);
 
+// =========================================================================
+// WEB PUSH NOTIFICATION ENDPOINTS (original paths preserved)
+// =========================================================================
+app.post('/subscribe-webpush', (req, res) => subscribeWebPush(req, res));
+app.post('/trigger-all-webpush', (req, res) => triggerAllWebPushNotifications(req, res));
 
+// Expo push notification endpoints
+app.post('/register-push-token', identifyUserMiddleware, (req, res) => registerPushToken(req, res));
+app.post('/test-push', (req, res) => testPushNotification(req, res));
+app.post('/trigger-user-notifications', (req, res) => triggerUserNotifications(req, res));
+app.post('/trigger-all-user-expo-notifications', (req, res) => triggerAllUserExpoNotifications(req, res));
 
-import authRoutes from "./routes/authRoutes.js";
-import jobLogRoutes from "./routes/jobLogRoutes.js";
-import { time } from 'console';
-app.use("/auth", authRoutes);
-app.use("/job-logs", jobLogRoutes);
+// =========================================================================
+// FACEBOOK ENDPOINTS (original paths preserved)
+// =========================================================================
+app.get('/facebook-photos', (req, res) => getFacebookPhotos(req, res));
+app.get('/facebook-posts', (req, res) => getFacebookPostsHandler(req, res));
+app.post('/get-facebook-photos', (req, res) => getFacebookPhotosViaApify(req, res));
 
+// =========================================================================
+// INGESTION ENDPOINTS (original paths preserved)
+// =========================================================================
+app.post('/ingest-store-dry-run', (req, res) => ingestStoreDryRun(req, res));
+app.post('/trigger-daily-ingest', (req, res) => triggerDailyIngest(req, res));
+app.post('/poll-gemini-batches', (req, res) => pollGeminiBatchesNow(req, res));
 
-
-
-app.post('/dashboardLogin', (req, res) => {
-  const { username, password } = req.body;
-  console.log('🔒 Login attempt:', username);
-  console.log('🔒 Password:', password);
-  const query = 'SELECT * FROM users WHERE first_name = ? AND last_name = ?';
-  db.query(query, [username, password], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Server error' });
-    if (results.length > 0) {
-      const user = results[0];
-      console.log('🔒 User found:', user.userName);
-      res.json({ user: { userId: user.userId, userName: user.userName } });
-    } else {
-      res.status(401).json({ message: 'Invalid username or password' });
-    }
-  });
-});
-
-
-app.get('/facebook-photos', async (req, res) => {
-  const pageId = req.query.facebookPageId;
-
-  console.log(`🔍 Fetching Facebook photos for page ID: ${pageId}`);
-
-  // insert the log in allMessages array
-
-  allMessages.push(`🔍 Fetching Facebook photos for page ID: ${pageId}`);
-
-
-  if (!pageId) {
-    return res.status(400).json({ error: 'Missing page_id query parameter' });
-  }
-
-  const data = await fetchFacebookPosts(pageId);
-
-  // Extract photo objects as array from the results object
-  const photoArray = Object.values(data.results || {});
-
-  console.log(`📸 Extracted ${photoArray} photos from page ID: ${pageId}`);
-
-  allMessages.push(`📸 Extracted ${photoArray.length} photos from page ID: ${pageId}`);
-
-  // Return in the format expected by Dashboard.jsx
-  res.json({ items: photoArray, allMessages: allMessages });
-
-});
-
-
-// ...existing code...
-
-app.get('/facebook-posts', async (req, res) => {
-  const pageId = req.query.facebookPageId;
-  const debugMessages = [];
-
-  debugMessages.push(`🔍 [facebook-posts] Called with facebookPageId: ${pageId}`);
-  console.log(`🔍 [facebook-posts] Called with facebookPageId: ${pageId}`);
-
-  if (!pageId) {
-    debugMessages.push('❌ [facebook-posts] Missing facebookPageId query parameter');
-    console.error('❌ [facebook-posts] Missing facebookPageId query parameter');
-    return res.status(400).json({ error: 'Missing facebookPageId query parameter', debugMessages });
-  }
-
+// =========================================================================
+// AI EXTRACTION ENDPOINTS (original paths preserved)
+// =========================================================================
+app.post('/extract-text-single', (req, res) => extractTextSingle(req, res));
+app.post('/extract-sale-end-date', async (req, res) => {
+  const { photos } = req.body;
+  const imageUrls = photos;
   try {
-    const posts = await fetchFacebookPosts(pageId);
-    debugMessages.push(`✅ [facebook-posts] fetchFacebookPosts returned ${posts.length} posts`);
-    console.log(`✅ [facebook-posts] fetchFacebookPosts returned:`, posts);
-    debugMessages.push(`✅ [facebook-posts] fetchFacebookPosts returned: ${posts}`);
-
-    // Flatten posts to array of photo objects for frontend compatibility
-    const items = [];
-    posts.forEach((post, postIdx) => {
-      debugMessages.push(`🔎 [facebook-posts] Post #${postIdx + 1}: message="${post.message}", images=${(post.images || []).length}`);
-      (post.images || []).forEach((imgObj, imgIdx) => {
-        items.push({
-          postId: post.postId,
-          message: post.message,
-          created_time: post.created_time,
-          uri: imgObj.uri,
-          image: imgObj.uri,
-          imageData: post.imageData,
-          imageId: imgObj.id,
-          timestamp: post.timestamp // Use post timestamp or current time
-        });
-        debugMessages.push(`  📸 [facebook-posts] Added image #${imgObj.id} for post #${post.postId}:`);
-      });
-    });
-
-    debugMessages.push(`📦 [facebook-posts] Flattened to ${items.length} image items`);
-    console.log(`📦 [facebook-posts] Flattened to ${items.length} image items`);
-
-    // Return both the flat array and the grouped posts for debugging
-    res.json({
-      items,
-      posts,
-      debugMessages,
-    });
-  } catch (err) {
-    debugMessages.push(`❌ [facebook-posts] API error: ${err?.message || err}`);
-    console.error('❌ [facebook-posts] API error:', err);
-    res.status(500).json({ error: err.message, debugMessages });
-  }
-});
-
-// Minimal, safe ingestion trigger for one store to validate extraction before DB writes.
-app.post('/ingest-store-dry-run', async (req, res) => {
-  const requestedStoreId = parseInt(req.body?.storeId ?? req.query?.storeId, 10);
-  const requestedPageId = req.body?.facebookPageId ?? req.query?.facebookPageId;
-  const maxImages = Math.max(1, parseInt(req.body?.maxImages ?? req.query?.maxImages ?? '8', 10) || 8);
-  const dryRun = parseBooleanFlag(req.body?.dryRun ?? req.query?.dryRun, true);
-
-  if (!Number.isFinite(requestedStoreId) && !requestedPageId) {
-    return res.status(400).json({ error: 'storeId or facebookPageId is required.' });
-  }
-
-  if (
-    Number.isFinite(requestedStoreId) &&
-    INGEST_STORE_IDS_DEFAULT.length > 0 &&
-    !INGEST_STORE_IDS_DEFAULT.includes(requestedStoreId)
-  ) {
-    return res.status(403).json({
-      error: 'storeId is not allowed by INGEST_STORE_IDS scope.',
-      allowedStoreIds: INGEST_STORE_IDS_DEFAULT,
-    });
-  }
-
-  const dbQuery = (query, params) => new Promise((resolve, reject) => {
-    db.query(query, params, (err, result) => {
-      if (err) return reject(err);
-      resolve(result);
-    });
-  });
-
-  try {
-    let storeId = requestedStoreId;
-    let facebookPageId = requestedPageId;
-
-    if (!facebookPageId && Number.isFinite(storeId)) {
-      const storeRows = await dbQuery(
-        'SELECT storeId, facebookPageId FROM stores WHERE storeId = ? AND active = true LIMIT 1',
-        [storeId]
-      );
-
-      if (!storeRows.length || !storeRows[0].facebookPageId) {
-        return res.status(404).json({ error: 'No active store/facebookPageId found for the provided storeId.' });
-      }
-      facebookPageId = storeRows[0].facebookPageId;
-    }
-
-    if (!Number.isFinite(storeId) && facebookPageId) {
-      const storeRows = await dbQuery(
-        'SELECT storeId FROM stores WHERE facebookPageId = ? AND active = true LIMIT 1',
-        [facebookPageId]
-      );
-      if (storeRows.length) {
-        storeId = storeRows[0].storeId;
-      }
-    }
-
-    if (!Number.isFinite(storeId)) {
-      return res.status(400).json({ error: 'Unable to resolve a valid storeId for ingestion.' });
-    }
-
-    const posts = await fetchFacebookPosts(facebookPageId);
-    const items = flattenFacebookPostsToItems(posts).filter(item => Boolean(item.uri));
-    const selectedItems = items.slice(0, maxImages);
-
-    if (selectedItems.length === 0) {
-      return res.status(200).json({
-        message: 'No image items found for this store/page.',
-        dryRun,
-        counts: { postsFetched: posts.length, imagesSelected: 0, productsExtracted: 0, productsInserted: 0 },
-      });
-    }
-
-    const { uploadMultipleFacebookPhotosToCloudinary } = await import('./uploadFacebookPhoto.js');
-    const imageUrlsToUpload = selectedItems.map(item => ({ imageUrl: item.uri, imageId: item.imageId }));
-    const uploadResults = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
-
-    const products = await formatDataToJson(
-      uploadResults,
-      storeId,
-      1,
-      `${storeId}-${Date.now()}`,
-      selectedItems.map(item => item.message || ''),
-      selectedItems[0].postId || null,
-      selectedItems[0].imageId || null,
-      selectedItems[0].timestamp || Math.floor(Date.now() / 1000),
-      { dryRun, runLabel: '/ingest-store-dry-run' }
-    );
-
-    return res.status(200).json({
-      message: dryRun ? 'Dry-run ingestion completed.' : 'Ingestion completed.',
-      dryRun,
-      storeId,
-      facebookPageId,
-      counts: {
-        postsFetched: posts.length,
-        imagesSelected: selectedItems.length,
-        imagesUploaded: uploadResults.length,
-        productsExtracted: products.length,
-        productsInserted: dryRun ? 0 : products.length,
-      },
-      sampleImageIds: selectedItems.slice(0, 5).map(item => item.imageId),
-    });
-  } catch (error) {
-    console.error('❌ [/ingest-store-dry-run] Error:', error);
-    return res.status(500).json({ error: 'Failed to run ingestion.', details: error.message });
-  }
-});
-
-
-// --- NEW: Manually trigger scheduled notification logic for a single user ---
-app.post('/trigger-user-notifications', async (req, res) => {
-  const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID is required.' });
-  }
-
-  console.log(`[Manual Trigger] Received request for user: ${userId}`);
-
-  try {
-    // 1. Get matching on-sale products for the user based on favorite keywords
-    const matchingProductsQuery = `
-      WITH UserFavoriteKeywords AS (
-        SELECT DISTINCT k.keyword
-        FROM favorites f
-        JOIN productkeywords pk ON f.productId = pk.productId
-        JOIN keywords k ON pk.keywordId = k.keywordId
-        WHERE f.userId = ?
-      ),
-      ProductsOnSale AS (
-        SELECT p.productId, p.product_description, k.keyword
-        FROM products p
-        JOIN productkeywords pk ON p.productId = pk.productId
-        JOIN keywords k ON pk.keywordId = k.keywordId
-        WHERE p.sale_end_date >= CURDATE()
-      )
-      SELECT DISTINCT pos.productId
-      FROM UserFavoriteKeywords ufk
-      JOIN ProductsOnSale pos ON ufk.keyword = pos.keyword;
-    `;
-    const matchingProducts = await queryPromise(matchingProductsQuery, [userId]);
-
-    if (matchingProducts.length === 0) {
-      console.log(`[Manual Trigger] No matching on-sale products found for user ${userId}.`);
-      return res.status(200).json({ message: 'Nuk u gjetën produkte në ofertë që përputhen me preferencat tuaja.' });
-    }
-
-    // 2. Get user's push tokens
-    const tokenResults = await queryPromise('SELECT token FROM push_tokens WHERE user_id = ?', [userId]);
-    if (tokenResults.length === 0) {
-      console.log(`[Manual Trigger] No push tokens found for user ${userId}.`);
-      return res.status(404).json({ message: 'Përdoruesi nuk ka shenja njoftimi të regjistruara.' });
-    }
-    const tokens = tokenResults.map(row => row.token);
-
-    // 3. Construct and send notifications
-    const productIds = matchingProducts.map(p => p.productId);
-    const productCount = productIds.length;
-    const body = `Ju keni ${productCount} produkte në ofertë që përputhen me preferencat tuaja.`;
-
-    const messages = [];
-    for (const pushToken of tokens) {
-      if (!Expo.isExpoPushToken(pushToken)) continue;
-      messages.push({
-        to: pushToken,
-        sound: 'default',
-        title: '✨ Oferta të Përshtatura për Ju!',
-        body,
-        data: { screen: 'ProductsOnSale', productIds },
-      });
-    }
-
-    if (messages.length === 0) {
-      return res.status(400).json({ message: 'Nuk u gjetën shenja të vlefshme njoftimi.' });
-    }
-
-    const expo = new Expo({ useFcmV1: true });
-    const chunks = expo.chunkPushNotifications(messages);
-
-    console.log(`[Manual Trigger] Sending ${messages.length} notification(s) to user ${userId}...`);
-    for (const chunk of chunks) {
-      await expo.sendPushNotificationsAsync(chunk);
-    }
-    console.log(`[Manual Trigger] Notifications sent successfully to user ${userId}.`);
-
-    return res.status(200).json({ message: `Njoftimi u dërgua me sukses për ${productCount} produkte.` });
-  } catch (error) {
-    console.error(`[Manual Trigger] Error processing request for user ${userId}:`, error);
-    return res.status(500).json({ error: 'Gabim në server gjatë dërgimit të njoftimit.' });
-  }
-});
-
-
-// --- NEW: Manually trigger the full notification job for all eligible users ---
-app.post('/trigger-all-user-notifications', async (req, res) => {
-  console.log('[Manual Trigger] Received request to run the full notification job for all users.');
-  try {
-    // Run the notification job asynchronously in background
-    (async () => {
+    const results = [];
+    for (const imageUrl of imageUrls) {
+      let sale_end_date = null;
       try {
-        await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
-          'manual-all-user-notifications',
-          'started',
-          'Manual notification job started for all users.'
-        ]);
-        await sendDailyProductNotifications(true);
-        await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
-          'manual-all-user-notifications',
-          'success',
-          'Manual notification job completed for all users.'
-        ]);
-      } catch (err) {
-        console.error('[Manual] Push notifications job error:', err.message);
-        try {
-          await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
-            'manual-all-user-notifications',
-            'failed',
-            err.message
-          ]);
-        } catch (dbErr) {
-          console.error('[Manual] Failed to log push notification failure to database:', dbErr.message);
-        }
-      }
-    })();
-
-    res.status(202).json({ message: 'Procesi i dërgimit të njoftimeve ka filluar. Kontrolloni regjistrat e serverit për detaje.' });
-  } catch (error) {
-    console.error('[Manual Trigger] Error starting the notification job:', error);
-    res.status(500).json({ error: 'Gabim gjatë fillimit të procesit të njoftimeve.' });
-  }
-});
-
-
-// ...existing code...
-app.get('/products-by-ids', async (req, res) => {
-  const { ids } = req.query; // Expecting a comma-separated string of IDs
-  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
-
-  if (!ids) {
-    return res.status(400).json({ error: 'Product IDs are required.' });
-  }
-
-  // Sanitize input by splitting, parsing to int, and filtering out invalid numbers
-  const productIds = ids.split(',').map(id => parseInt(id.trim(), 10)).filter(Number.isFinite);
-
-  if (productIds.length === 0) {
-    return res.status(400).json({ error: 'No valid product IDs provided.' });
-  }
-
-  try {
-    // UPDATED: The query now joins with the favorites table to check the favorite status for the current user.
-    const query = `
-      SELECT 
-        p.*,
-        f.userId IS NOT NULL AS isFavorite
-      FROM 
-        products p
-      LEFT JOIN 
-        favorites f ON p.productId = f.productId AND f.userId = ?
-      WHERE 
-        p.productId IN (?)
-    `;
-    const products = await queryPromise(query, [userId, productIds]);
-    res.status(200).json(products);
-  } catch (error) {
-    console.error('Error fetching products by IDs:', error);
-    res.status(500).json({ error: 'Failed to fetch products.' });
-  }
-});
-
-
-// API endpoint to get Facebook photo URLs for a specific date
-// ...existing code...
-
-
-// API endpoint to get Facebook photo URLs for a specific date
-app.post('/get-facebook-photos', async (req, res) => {
-
-
-  // console.log(`🔍 Fetching Facebook photos for page: ${pageUrl} on date: ${date}`);
-
-
-  const { selectedStore, facebookUrl } = req.body;
-
-  console.log(`🔍 Fetching Facebook photos for store: ${selectedStore} with URL: ${facebookUrl}`);
-
-
-
-  const facebookData = [
-    { url: facebookUrl, storeId: selectedStore }
-  ];
-
-  console.log(`🔍 Facebook data to scrape:`, facebookData);
-
-
-  console.log(`🔍 Fetching Facebook photos ....`);
-
-
-
-
-  if (facebookData.length === 0) {
-    console.error(`❌ No URLs found for storeId ${mystoreId}`);
-    return res.status(404).json({ error: `No URLs found for storeId ${mystoreId}` });
-  }
-
-
-
-  try {
-    const input = {
-      startUrls: facebookData,
-      resultsLimit: 10,
-      proxy: {
-        useApifyProxy: true,
-        apifyProxyGroups: ['RESIDENTIAL'],
-      },
-    };
-
-    // Run the actor
-    const run = await apify.actor('apify/facebook-photos-scraper').call(input);
-
-    // Fetch dataset items
-    const { items } = await apify.dataset(run.defaultDatasetId).listItems();
-
-
-    console.log(`📸 Fetched ${items.length} items from Facebook.`);
-    //console.log(`📸 Items:`, items);
-
-
-
-    res.json({
-      items: items
-    });
+        sale_end_date = await extractSaleEndDateFromImage(imageUrl);
+      } catch (err) {}
+      results.push({ image: imageUrl, sale_end_date: sale_end_date || null });
+    }
+    return res.json(results);
   } catch (err) {
-    console.error('Error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch photos', details: err.message });
+    return res.status(500).json({ message: 'Failed to extract sale end date.', error: err.message });
   }
 });
 
+// =========================================================================
+// USER INITIALIZATION ENDPOINTS
+// =========================================================================
+app.get('/initialize', handleInitialize);
+app.get('/initialize0', handleInitialize);
+app.get('/initialize2', handleInitialize);
+app.get('/initialize-anonymous', async (req, res) => {
+  try {
+    const [result] = await db.promise().query('INSERT INTO users () VALUES ()');
+    const userId = result.insertId;
+    if (!userId) return res.status(500).json({ message: 'Failed to create anonymous user.' });
+    const token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '2y' });
+    res.json({ token });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error during initialization.' });
+  }
+});
 
-
-// Consider removing this if /auth/check-session is sufficient and used by frontend
-app.get("/check-session", async (req, res) => {
+// =========================================================================
+// SESSION CHECK (full self-healing version)
+// =========================================================================
+app.get('/check-session', async (req, res) => {
   const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  console.log(`🔍 [check-session] (${reqId}) start ${req.method} ${req.originalUrl}`);
-
-  // Determine how the client is authenticating so we can suggest the right recovery.
   const hasAuthHeader = Boolean(req.headers.authorization && req.headers.authorization.startsWith('Bearer '));
   const hasJwtCookie = Boolean(req.cookies && req.cookies.jwt);
-  const authSource = hasAuthHeader ? 'header' : (hasJwtCookie ? 'cookie' : 'none');
-
-  const tokenUserId = req.identifiedUser?.userId ?? null; // could be "anon_..."
-  const numericId = req.identifiedUser?.id ?? (
-    typeof tokenUserId === 'string' && /^\d+$/.test(tokenUserId) ? parseInt(tokenUserId, 10) : null
-  );
-
-  console.log(`🔍 [check-session] (${reqId}) authSource=${authSource} hasHeader=${hasAuthHeader} hasCookie=${hasJwtCookie} tokenUserId=${tokenUserId ?? 'null'} numericId=${numericId ?? 'null'}`);
+  const authSource = hasAuthHeader ? 'header' : hasJwtCookie ? 'cookie' : 'none';
+  const tokenUserId = req.identifiedUser?.userId ?? null;
+  const numericId =
+    req.identifiedUser?.id ??
+    (typeof tokenUserId === 'string' && /^\d+$/.test(tokenUserId) ? parseInt(tokenUserId, 10) : null);
 
   if (!tokenUserId && !numericId) {
-    console.log(`⚠️ [check-session] (${reqId}) no valid token found.`);
     return res.json({
       isLoggedIn: false,
       isRegistered: false,
@@ -936,35 +245,27 @@ app.get("/check-session", async (req, res) => {
   }
 
   try {
-    // If we have a numeric id, prefer it. Otherwise fallback to public userId column.
     const q = numericId
       ? `SELECT id, email, first_name, is_registered FROM users WHERE id = ? LIMIT 1`
       : `SELECT id, email, first_name, is_registered FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1`;
-
     const results = await queryPromise(q, [numericId ?? tokenUserId]);
 
     if (!results || results.length === 0) {
-      console.warn(`⚠️ [check-session] (${reqId}) token user not found in DB. tokenUserId=${tokenUserId} numericId=${numericId} authSource=${authSource}`);
-
-      // Self-heal: if the JWT is valid and represents an anon_* identity, ensure a DB row exists.
-      // This prevents production loops where /initialize returned a token but the user row was never created.
       if (!numericId && typeof tokenUserId === 'string' && tokenUserId.startsWith('anon_')) {
         try {
           const repairedId = await ensureAnonUserRow({ tokenUserId, reqId, caller: 'check-session' });
           if (repairedId) {
             const repaired = await queryPromise(
               'SELECT id, email, first_name, is_registered FROM users WHERE id = ? LIMIT 1',
-              [repairedId]
+              [repairedId],
             );
-
             if (Array.isArray(repaired) && repaired.length > 0) {
-              const user = repaired[0];
-              console.log(`🟢 [check-session] (${reqId}) repaired missing anon user. userId=${user.id} tokenUserId=${tokenUserId}`);
+              const u = repaired[0];
               return res.json({
                 isLoggedIn: true,
-                isRegistered: !!user.is_registered,
-                userId: user.id,
-                email: user.email ?? null,
+                isRegistered: !!u.is_registered,
+                userId: u.id,
+                email: u.email ?? null,
                 shouldReinitialize: false,
                 reason: null,
                 authSource,
@@ -972,16 +273,10 @@ app.get("/check-session", async (req, res) => {
             }
           }
         } catch (e) {
-          console.error(`❌ [check-session] (${reqId}) failed to self-heal anon user ${tokenUserId}:`, e);
+          logger.error(`[check-session] self-heal failed:`, e);
         }
       }
-
-      // If auth came from a cookie, clearing it can help the browser recover.
-      // If auth came from Authorization header, the client must clear localStorage token.
-      if (authSource === 'cookie') {
-        res.clearCookie('jwt');
-      }
-
+      if (authSource === 'cookie') res.clearCookie('jwt');
       return res.json({
         isLoggedIn: false,
         isRegistered: false,
@@ -993,19 +288,17 @@ app.get("/check-session", async (req, res) => {
       });
     }
 
-    const user = results[0];
-    console.log(`✅ [check-session] (${reqId}) ok userId=${user.id} is_registered=${user.is_registered} authSource=${authSource}`);
+    const u = results[0];
     return res.json({
       isLoggedIn: true,
-      isRegistered: !!user.is_registered,
-      userId: user.id,
-      email: user.email ?? null,
+      isRegistered: !!u.is_registered,
+      userId: u.id,
+      email: u.email ?? null,
       shouldReinitialize: false,
       reason: null,
       authSource,
     });
   } catch (err) {
-    console.error("❌ DB error during /check-session:", err);
     return res.status(500).json({
       isLoggedIn: false,
       isRegistered: false,
@@ -1018,2061 +311,155 @@ app.get("/check-session", async (req, res) => {
   }
 });
 
+// =========================================================================
+// DASHBOARD & AUTH ENDPOINTS
+// =========================================================================
+app.post('/dashboardLogin', (req, res) => {
+  const { username, password } = req.body;
+  const query = 'SELECT * FROM users WHERE first_name = ? AND last_name = ?';
+  db.query(query, [username, password], (err, results) => {
+    if (err) return res.status(500).json({ message: 'Server error' });
+    if (results.length > 0) {
+      const user = results[0];
+      res.json({ user: { userId: user.userId, userName: user.userName } });
+    } else {
+      res.status(401).json({ message: 'Invalid username or password' });
+    }
+  });
+});
 
-app.get('/auth/google',
-  passport.authenticate('google', { scope: ['profile', 'email'] }));
-
-
-app.get("/auth/google/callback", passport.authenticate("google", { failureRedirect: "/" }), (req, res) => {
-  console.log("Google OAuth Callback Triggered");
-  console.log("Cookies received:", req.cookies);
+app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => {
   const token = req.cookies.jwt;
-
-  if (!token) {
-    console.error("⚠️ No JWT token found in cookies.");
-    return res.status(400).json({ error: "JWT token is missing" });
-  }
-
+  if (!token) return res.status(400).json({ error: 'JWT token is missing' });
   try {
-    console.log("Using TOKEN_SECRET for verification:", process.env.TOKEN_SECRET);
     const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-    console.log("✅ Decoded Token:", decoded);
     const userId = decoded.userId;
     const email = req.user.emails[0].value;
-    console.log(`Updating email for userId: ${userId}, New Email: ${email}`);
-    const query = `UPDATE users SET email = ? WHERE userId = ?`;
-    db.query(query, [email, userId], (err, result) => {
-      if (err) {
-        console.error("❌ Error updating user email:", err);
-        return res.status(500).json({ error: "Database error" });
-      }
+    db.query(`UPDATE users SET email = ? WHERE userId = ?`, [email, userId], (err) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
       res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
     });
   } catch (err) {
-    console.error("❌ JWT Verification Error:", err.message);
-    return res.status(401).json({ error: "Invalid token" });
+    return res.status(401).json({ error: 'Invalid token' });
   }
 });
 
-
-app.get("/auth/google/callback3", passport.authenticate("google", { failureRedirect: "/" }), (req, res) => {
-  console.log("Cookies received:", req.cookies);
-  const token = req.cookies.jwt;
-  console.log("Token received:", token);
-  const email = req.user.emails[0].value;
-  const googleId = req.user.id;
-  const name = req.user.displayName;
-
-  if (!token) {
-    return res.status(400).json({ error: "JWT token is missing" });
-  }
-
-  console.log("Received Token:", token);
-  console.log("Decoded Token:", jwt.decode(token));
-
-  try {
-    console.log("JWT Secret Key:", process.env.TOKEN_SECRET);
-    const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-    console.log("Decoded Token:", decoded);
-    const userId = decoded.userId;
-    console.log("User ID from JWT:", userId);
-    const query = `UPDATE users SET email = ? WHERE userId = ?`;
-    db.query(query, [email, userId], (err, result) => {
-      if (err) {
-        console.error("Error updating user email:", err);
-        return res.status(500).json({ error: "Database error" });
-      }
-      res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
-    });
-  } catch (err) {
-    console.error("❌ JWT Verification Error:", err.message);
-    return res.status(401).json({ error: "Invalid token" });
-  }
-});
-
-
-const SECRET_KEY = 'AAAA-BBBB-CCCC-DDDD-EEEE'; // Consider moving this to environment variables
-
-const upload = multer({ dest: 'uploads/' }); // Define upload middleware
-
-
-// add api endpoint like /extract-text that calls extractSaleEndDateFromImage and returns the sale end date
-
-app.post('/extract-sale-end-date', async (req, res) => {
-
-  const { photos } = req.body;
-
-  const imageUrls = photos;
-
-
-  console.log('🔍 Extracting sale end date from image URL:', photos);
-
-
-  try {
-    const results = [];
-    for (const imageUrl of imageUrls) {
-      let sale_end_date = null;
-      try {
-        sale_end_date = await extractSaleEndDateFromImage(imageUrl);
-      } catch (err) {
-        console.error('❌ Error extracting date for image:', imageUrl, err);
-      }
-      results.push({ image: imageUrl, sale_end_date: sale_end_date || null });
-    }
-    return res.json(results);
-  } catch (err) {
-    console.error('❌ Error in /extract-sale-end-date route:', err);
-    return res.status(500).json({
-      message: 'Failed to extract sale end date from images.',
-      error: err.message
-    });
-  }
-
-});
-
-
-// ...existing code...
-
-/**
- * Enhanced /extract-text-single endpoint:
- * - Accepts: { images: [ { imageUrl, imageId, storeId, flyerBookId, facebookUrl, postText, created_time, ... } ] }
- * - Uploads all images to Cloudinary (skips those already in DB)
- * - Calls formatDataToJson with all uploaded URLs and metadata arrays
- * - Saves each imageId to facebookPhotos table
- * - Returns: uploaded Cloudinary URLs, extracted products, allMessages, and debug info
- */
-app.post('/extract-text-single', async (req, res) => {
-  console.log('🔍 [extract-text-single] Extracting data from images using Gemini 1.5 Pro…');
-
-  const images = req.body.images;
-  if (!Array.isArray(images) || images.length === 0) {
-    console.error('❌ No images array provided.');
-    return res.status(400).json({ message: 'No images array provided.' });
-  }
-
-  // check if storeId and userId are provided in the request body
-
-  console.log('🔍 [extract-text-single] Received images:', images);
-  console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
-  console.log('🔍 [extract-text-single] Image idss', images[0].imageId);
-
-  allMessages.push(`🔍 [extract-text-single] Received images: ${JSON.stringify(images)}`);
-
-
-  if (!images[0].storeId) {
-    console.error('❌ Missing storeId in request body.');
-    return res.status(400).json({ message: 'Missing storeId in request body.' });
-  }
-
-  // Debug: log all received images
-  images.forEach((img, idx) => {
-    console.log(`[extract-text-single] Image #${idx + 1}:`, img);
-  });
-
-  // Prepare arrays for new images (not in DB)
-  const newImages = [];
-  for (const img of images) {
-    newImages.push(img);
-  }
-
-  if (newImages.length === 0) {
-    return res.status(400).json({ message: 'All imageIds already exist in database.' });
-  }
-
-
-  // Upload all new images to Cloudinary
-  const { uploadMultipleFacebookPhotosToCloudinary } = await import('./uploadFacebookPhoto.js');
-
-  //const imageUrlsToUpload = images.map(img => img.imageUrl + '&imageId=' + img.imageId );
-
-  // make imageUrlsToUpload an array of objects of image URLs to upload with imageUrl and imageId
-
-  const imageUrlsToUpload = images.map(img => ({
-    imageUrl: img.imageUrl,
-    imageId: img.imageId,
-
-  }));
-
-
-  let uploadResults = [];
-  let cloudinaryUrls = [];
-
-
-  try {
-    uploadResults = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
-    cloudinaryUrls = uploadResults.map(img => img.uploadedUrl);
-    //imageIds = uploadResults.map(img => img.imageId);
-    console.log('✅ Uploaded images to Cloudinary.');
-  } catch (err) {
-    console.error('❌ Error uploading images to Cloudinary:', err);
-    return res.status(500).json({ error: 'Failed to upload images to Cloudinary', details: err.message });
-  }
-
-  // print storeId and userId from images 
-  console.log('🔍 [extract-text-single] Store ID:', images[0].storeId);
-
-  // Prepare metadata arrays for formatDataToJson
-  const storeId = images[0].storeId; // Assuming storeId is provided in the first image object
-  const postId = images[0].postId; // Optional postId, default to null if not provided
-  const userId = images[0].userId || 1; // Default to 1 if userId not provided
-  const flyerBookId = images[0].flyerBookId // Generate random flyerBookId if not provided
-  // Optionally, collect postText and facebookUrl if you want to use them in formatDataToJson
-  const postText = newImages.map(img => img.postText || '');
-  const imageId = images[0].imageId;
-
-  const timestamp = images[0].timestamp // Use created_time or current time
-  // print potText array
-
-
-
-  console.log('🔍 [extract-text-single] timestamp', timestamp);
-
-
-
-  console.log('🔍 [extract-text-single] Post Text Array:', postText);
-  console.log('🔍 [extract-text-single] postId:', postId);
-  console.log('🔍 [extract-text-single] photo ID:', storeId);
-  //console.log('🔍 [extract-text-single] Image Data Array:', imageId);
-  allMessages.push(`🔍 [extract-text-single] Post Text Array: ${JSON.stringify(postText)}`);
-  allMessages.push(`🔍 [extract-text-single] postId: ${postId}`);
-  allMessages.push(`🔍 [extract-text-single] photo ID: ${storeId}`);
-  allMessages.push(`🔍 [extract-text-single] imageId: ${imageId}`);
-  allMessages.push(`🔍 [extract-text-single] timestamp: ${timestamp}`);
-  //allMessages.push(`🔍 [extract-text-single] Image Data Array: ${JSON.stringify(imageData)}`);
-
-
-  try {
-    // Call formatDataToJson with all uploaded Cloudinary URLs
-    const products = await formatDataToJson(
-      uploadResults,
-      storeId,
-      userId,
-      flyerBookId,
-      postText, // Pass postText array if needed
-      // Optionally add: postText, facebookUrl
-      postId,
-      imageId,
-      timestamp, // Pass timestamp if needed
-      {
-        dryRun: INGEST_DRY_RUN_DEFAULT,
-        runLabel: '/extract-text-single',
-      }
-    );
-
-
-    console.log('✅ Formatted JSON from Gemini:', products);
-    allMessages.push(`✅ Formatted JSON from Gemini: ${JSON.stringify(products)}`);
-
-    res.json({
-      cloudinaryUrls,
-      products,
-      allMessages,
-      debug: {
-        input: images,
-        uploaded: cloudinaryUrls
-      }
-    });
-  } catch (err) {
-    console.error('❌ Error in /extract-text-single:', err);
-    res.status(500).json({ error: 'Failed to process images', details: err.message });
-  }
-});
-
-// ...existing code...
-
-async function listAllMediaFiles() {
-  try {
-    const result = await cloudinary.api.resources({
-      type: 'upload',
-      max_results: 100,
-    });
-
-    const mediaFiles = result.resources.map((resource) => ({
-      public_id: resource.public_id,
-      format: resource.format,
-      secure_url: resource.secure_url,
-      thumbnail_url: cloudinary.url(resource.public_id, {
-        width: 100,
-        height: 100,
-        crop: 'thumb',
-      }),
-    }));
-    return mediaFiles;
-  } catch (error) {
-    console.error('Error fetching media files:', error);
-    return { error: 'Error fetching media files' };
-  }
+// =========================================================================
+// USER PREFERENCES
+// =========================================================================
+const requireUser = (req, res, next) => {
+  if (!req.identifiedUser?.userId) return res.status(401).json({ error: 'User identification required.' });
+  next();
 };
 
-cloudinary.config({
-  cloud_name: 'dt7a4yl1x',
-  api_key: '443112686625846',
-  api_secret: 'e9Hv5bsd2ECD17IQVOZGKuPmOA4',
-});
-
-
-function generateJwtToken(payload, expiresIn = '240h') {
-  return jwt.sign(payload, SECRET_KEY, { expiresIn });
-}
-
-function authenticateJWT(req, res, next) {
-  const token = req.cookies.jwt;
-  if (!token) {
-    return res.status(401).json({ message: 'Unauthorized: No token provided' });
-  }
+app.get('/user/preferences', requireUser, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, SECRET_KEY);
-    req.user = decoded;
-    next();
-  } catch (error) {
-    res.status(403).json({ message: 'Invalid or expired token' });
-  }
-}
-
-app.get('/media-library-json', async (req, res) => {
-  const mediaJson = await listAllMediaFiles();
-  res.json(mediaJson);
-});
-
-
-app.get('/testing', async (req, res) => {
-  const mediaJson = "this is testinggggggggggggg"
-  console.log('🟢 Media Library endpoint hit');
-  res.json(mediaJson);
-});
-
-const ensureAnonUserRow = async ({ tokenUserId, reqId, caller }) => {
-  if (typeof tokenUserId !== 'string' || !tokenUserId.startsWith('anon_')) return null;
-
-  // NOTE: the schema does not enforce UNIQUE(users.userId). Using ON DUPLICATE KEY is ineffective.
-  // To avoid duplicate anon rows under retries/concurrency, use a short MySQL advisory lock.
-  const lockName = `users.userId:${tokenUserId}`.slice(0, 64);
-  let gotLock = false;
-
-  const parseGotLock = (rows) => {
-    if (!Array.isArray(rows) || rows.length === 0) return false;
-    const row = rows[0] || {};
-    const value = row.gotLock ?? row.GOT_LOCK ?? Object.values(row)[0];
-    return value === 1 || value === '1' || value === true;
-  };
-
-  try {
-    try {
-      const lockRows = await queryPromise('SELECT GET_LOCK(?, 2) AS gotLock', [lockName]);
-      gotLock = parseGotLock(lockRows);
-      if (!gotLock) {
-        console.warn(`⚠️ [${caller}] (${reqId}) could not obtain GET_LOCK for ${tokenUserId}; continuing without lock`);
-      }
-    } catch (e) {
-      // If GET_LOCK is unavailable, continue best-effort without it.
-      console.warn(`⚠️ [${caller}] (${reqId}) GET_LOCK failed; continuing without lock: ${e.message}`);
-    }
-
-    const existing = await queryPromise(
-      'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
-      [tokenUserId]
+    const [user] = await queryPromise(
+      'SELECT first_name, last_name, email, notification_frequency FROM users WHERE id = ?',
+      [req.identifiedUser.userId],
     );
-    if (Array.isArray(existing) && existing[0]?.id) return existing[0].id;
-
-    await queryPromise(
-      `INSERT INTO users (userId, is_registered, timestamp)
-       SELECT ?, ?, NOW()
-       FROM DUAL
-       WHERE NOT EXISTS (SELECT 1 FROM users WHERE userId = ? LIMIT 1)`,
-      [tokenUserId, false, tokenUserId]
-    );
-
-    const repaired = await queryPromise(
-      'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
-      [tokenUserId]
-    );
-    return Array.isArray(repaired) && repaired[0]?.id ? repaired[0].id : null;
-  } finally {
-    if (gotLock) {
-      try {
-        await queryPromise('SELECT RELEASE_LOCK(?)', [lockName]);
-      } catch {
-        // ignore
-      }
-    }
-  }
-};
-
-const handleInitialize = async (req, res) => {
-  const reqId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const redactToken = (t) => {
-    if (!t || typeof t !== 'string') return null;
-    if (t.length <= 18) return '***';
-    return `${t.slice(0, 10)}…${t.slice(-6)}`;
-  };
-
-  const buildJwtCookieOptions = () => {
-    const forwardedProto = req.headers['x-forwarded-proto'];
-    const isHttps = Boolean(req.secure) || (typeof forwardedProto === 'string' && forwardedProto.includes('https'));
-    const host = (req.headers.host || '').split(':')[0];
-    const isMenivenDomain = host.endsWith('meniven.com');
-
-    const cookieOptions = {
-      httpOnly: true,
-      secure: isHttps,
-      // Subdomains (www <-> api) are same-site, but SameSite=None on HTTPS is the most robust
-      // across different browser cookie policies and deployment setups.
-      sameSite: isHttps ? 'None' : 'Lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-    };
-
-    // Make the cookie available to both api.meniven.com and www.meniven.com.
-    if (isMenivenDomain) cookieOptions.domain = '.meniven.com';
-    return cookieOptions;
-  };
-
-  console.log(`🟢 [initialize] (${reqId}) hit ${req.method} ${req.originalUrl}`);
-  console.log(`🟢 [initialize] (${reqId}) origin=${req.headers.origin || 'n/a'} ip=${req.ip} ua=${req.headers['user-agent'] || 'n/a'}`);
-
-  const headerToken = req.headers.authorization?.startsWith('Bearer ')
-    ? req.headers.authorization.split(' ')[1]
-    : null;
-  const cookieToken = req.cookies?.jwt || null;
-
-  console.log(`🟢 [initialize] (${reqId}) token sources: header=${Boolean(headerToken)} cookie=${Boolean(cookieToken)} identifiedUser=${req.identifiedUser ? JSON.stringify(req.identifiedUser) : 'null'}`);
-
-  // Check if user is already identified by the middleware
-  if (req.identifiedUser && req.identifiedUser.userId) {
-    const tokenUserId = req.identifiedUser.userId;
-    console.log(`✅ [initialize] (${reqId}) user already identified: userId=${tokenUserId} dbId=${req.identifiedUser.id ?? 'n/a'}`);
-
-    // ✅ Ensure anon_* users always have a DB row (prevents check-session "user not found" loops)
-    try {
-      if (typeof tokenUserId === 'string' && tokenUserId.startsWith('anon_')) {
-        const dbId = await ensureAnonUserRow({ tokenUserId, reqId, caller: 'initialize' });
-        if (dbId) {
-          if (!req.identifiedUser.id) req.identifiedUser.id = dbId;
-          console.log(`✅ [initialize] (${reqId}) ensured anon user row. userId=${tokenUserId} id=${dbId}`);
-        } else {
-          console.warn(`⚠️ [initialize] (${reqId}) could not ensure anon user row. userId=${tokenUserId}`);
-        }
-      }
-    } catch (e) {
-      console.error(`❌ [initialize] (${reqId}) failed to ensure user exists:`, e);
-      // Don't hard-fail init; we still return the token so client can retry /check-session.
-    }
-
-    // Also send the token in the body for mobile clients that might need it.
-    // And ensure a cookie exists for web clients even if they authenticated via Authorization.
-    const token = headerToken || cookieToken;
-    if (token && !cookieToken) {
-      const cookieOptions = buildJwtCookieOptions();
-      res.cookie('jwt', token, cookieOptions);
-      res.setHeader('Meniven-Init-Cookie', '1');
-      console.log(`🟢 [initialize] (${reqId}) Set-Cookie jwt for identified user; options=${JSON.stringify(cookieOptions)}`);
-    }
-    console.log(`✅ [initialize] (${reqId}) returning identified user. token=${redactToken(token)}`);
-    return res.json({ message: 'User identified', userId: tokenUserId, token, cookieAttempted: Boolean(token) && !Boolean(cookieToken) });
-  }
-
-  // No valid identified user -> create a new anonymous user + token.
-  console.log(`⚠️ [initialize] (${reqId}) no valid user identified. Generating new anonymous user.`);
-
-  if (!process.env.TOKEN_SECRET) {
-    console.error(`❌ [initialize] (${reqId}) TOKEN_SECRET is not set; cannot sign JWT.`);
-    return res.status(500).json({ message: 'Server misconfigured: TOKEN_SECRET missing.' });
-  }
-
-  const anonymousUserId = `anon_${Date.now()}`;
-  const tokenPayload = { userId: anonymousUserId };
-  const token = jwt.sign(tokenPayload, process.env.TOKEN_SECRET, { expiresIn: '30d' });
-
-  console.log(`🟡 [initialize] (${reqId}) generated anonymous userId=${anonymousUserId} jwt=${redactToken(token)}`);
-
-  try {
-    const dbId = await ensureAnonUserRow({ tokenUserId: anonymousUserId, reqId, caller: 'initialize' });
-    console.log(`🟡 [initialize] (${reqId}) ensured DB user row for new anon. userId=${anonymousUserId} id=${dbId ?? 'n/a'}`);
-
-    const cookieOptions = buildJwtCookieOptions();
-
-    res.cookie('jwt', token, cookieOptions);
-    res.setHeader('Meniven-Init-Cookie', '1');
-    console.log(`✅ [initialize] (${reqId}) anonymous user initialized. Set-Cookie jwt; options=${JSON.stringify(cookieOptions)}`);
-    return res.json({ message: 'Anonymous user initialized', userId: anonymousUserId, token, cookieAttempted: true });
-  } catch (err) {
-    console.error(`❌ [initialize] (${reqId}) failed to insert anonymous user into DB:`, err);
-    return res.status(500).json({ message: 'Failed to initialize anonymous user.' });
-  }
-};
-
-// Legacy endpoints kept for compatibility; route to the same implementation.
-app.get('/initialize0', handleInitialize);
-
-
-app.get('/initialize-anonymous', async (req, res) => {
-  try {
-    // Insert a new anonymous user into the database
-    // The `userId` will be auto-incremented. Other fields are nullable.
-    const [result] = await db.promise().query('INSERT INTO users () VALUES ()');
-
-    const userId = result.insertId;
-    if (!userId) {
-      return res.status(500).json({ message: 'Failed to create anonymous user.' });
-    }
-
-    console.log(`[API] Created new anonymous user with ID: ${userId}`);
-
-    // Create a long-lived token for the anonymous user
-    const token = jwt.sign({ userId }, process.env.TOKEN_SECRET, { expiresIn: '2y' });
-
-    res.json({ token });
-  } catch (error) {
-    console.error('[API] Error initializing anonymous session:', error);
-    res.status(500).json({ message: 'Server error during initialization.' });
-  }
-});
-
-
-app.get('/initialize', handleInitialize);
-
-
-app.get('/initialize2', handleInitialize);
-
-
-app.post('/save-preferences', (req, res) => {
-  const { userId } = req.user;
-  const { preferences } = req.body;
-  res.json({ message: 'Preferences saved', userId, preferences });
-});
-
-app.get('/get-preferences', (req, res) => {
-  const { userId } = req.user;
-  res.json({ message: 'Preferences retrieved', userId });
-});
-
-
-app.delete('/deleteProduct/:productId', async (req, res) => {
-  console.log('Delete product endpoint hit');
-  const productId = req.params.productId;
-  console.log('productId received:', productId);
-  const dbQuery = (query, params) => {
-    return new Promise((resolve, reject) => {
-      db.query(query, params, (err, result) => {
-        if (err) {
-          return reject(err);
-        }
-        resolve(result);
-      });
-    });
-  };
-
-  try {
-    await dbQuery('START TRANSACTION');
-    await dbQuery('DELETE FROM productkeywords WHERE productId = ?', [productId]);
-    await dbQuery(`
-      DELETE FROM keywords
-      WHERE keywordId NOT IN (SELECT keywordId FROM productkeywords)
-    `);
-    await dbQuery('DELETE FROM products WHERE productId = ?', [productId]);
-    await dbQuery('COMMIT');
-    res.status(200).json({ message: 'Product and related data deleted successfully.' });
-  } catch (error) {
-    await dbQuery('ROLLBACK');
-    console.error('Error deleting product:', error);
-    res.status(500).json({ message: 'An error occurred while deleting the product.' });
-  }
-});
-
-
-
-
-async function insertProducts1(jsonData) {
-  console.log('Insert products endpoint hit');
-  console.log('JSON data received:', jsonData);
-  console.log('JSON data type:', typeof jsonData);
-
-  // Check if jsonData is already an object or array
-  const products = Array.isArray(jsonData) ? jsonData : JSON5.parse(jsonData);
-  console.log('Products received:', products);
-
-  allMessages.push(`Insert products endpoint hit with ${products.length} products.`);
-  allMessages.push(`JSON data type: ${typeof jsonData}`);
-
-  if (!Array.isArray(products)) {
-    console.error('Invalid JSON format:', products);
-    allMessages.push('❌ Invalid JSON format received in insertProducts1');
-    return; // Return without sending response as this is called from formatDataToJson
-  }
-
-  // if the array is empty, return without doing anything
-  if (products.length === 0) {
-    console.log('No products to insert, array is empty.');
-    allMessages.push('No products to insert, array is empty.');
-    return; // Return without sending response as this is called from formatDataToJson
-  }
-
-  const dbQuery = (query, params) => {
-    return new Promise((resolve, reject) => {
-      db.query(query, params, (err, result) => {
-        if (err) {
-          return reject(err);
-        }
-        resolve(result);
-      });
-    });
-  };
-
-  try {
-    await dbQuery('START TRANSACTION');
-    for (const product of products) {
-      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId, imageId, timestamp } = product;
-      console.log('Processing product:', product);
-
-      const dateObject = new Date(timestamp);
-      const formattedTimestamp = dateObject.toISOString().slice(0, 19).replace('T', ' ');
-
-
-      console.log('Product postId:', postId);
-
-      console.log('timestamp insert product:', timestamp);
-
-
-      allMessages.push(`Processing product with ImageId: ${imageId}`);
-      allMessages.push(`timestamp in insert : ${timestamp}`);
-
-      // make sure the old_price, new_price, are numbers , if not , convert them to numbers with decimal if needed to it can fit in the database
-      // if the price is missing or null set it to 0
-
-      // --- FIX: Ensure prices are parsed as numbers before insertion ---
-      const oldPriceNumber = old_price ? parseFloat(String(old_price).replace(',', '.').replace(/[^0-9.-]/g, '')) : 0;
-      const newPriceNumber = new_price ? parseFloat(String(new_price).replace(',', '.').replace(/[^0-9.-]/g, '')) : 0;
-
-
-      // --- FIX: Ensure imageId is treated as a number ---
-      const numericImageId = parseInt(imageId, 10);
-      if (isNaN(numericImageId)) {
-        throw new Error(`Invalid numeric value for imageId: ${imageId}`);
-      }
-
-      // --- FIX: Ensure flyer_book_id is treated as a valid INT ---
-      let numericFlyerBookId = null;
-      if (flyer_book_id !== undefined && flyer_book_id !== null) {
-        // If it's a string like '1-1782075117099', strip the storeId prefix and extract the timestamp part
-        const strVal = String(flyer_book_id);
-        const parts = strVal.split('-');
-        const targetValue = parts.length > 1 ? parts[1] : parts[0];
-        // Parse as integer, keeping only the final 9 digits to prevent overflowing MySQL 32-bit INT limit (max 2147483647)
-        const parsed = parseInt(targetValue, 10);
-        if (!isNaN(parsed)) {
-          // If the timestamp matches Millisecond format like 1782075117099, reduce it to fit INT
-          numericFlyerBookId = parsed > 2147483647 ? parsed % 1000000000 : parsed;
-        }
-      }
-
-      allMessages.push(`Processing product with ImageId: ${numericImageId}`);
-      allMessages.push(`timestamp in insert : ${formattedTimestamp}`);
-
-
-
-      console.log('Image URL:', image_url);
-      allMessages.push(`Image URL: ${image_url}`);
-
-
-      const productResult = await dbQuery(
-        `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId , timestamp)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? , ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, numericFlyerBookId, postId, numericImageId, formattedTimestamp]
-      );
-
-      const productId = productResult.insertId;
-      console.log('Inserted productId:', productId);
-      allMessages.push(`Inserted productId: ${productId}`);
-
-      if (!Array.isArray(keywords)) {
-        console.log('Keywords is not an array:', keywords);
-        allMessages.push(`❌ Keywords must be an array, received: ${typeof keywords}`);
-        throw new Error('Keywords must be an array');
-      }
-
-      for (const keyword of keywords) {
-        //console.log('Processing keyword:', keyword);
-        //allMessages.push(`Processing keyword: ${keyword}`);
-        const existingKeyword = await dbQuery(
-          `SELECT keywordId FROM keywords WHERE keyword = ?`,
-          [keyword]
-        );
-
-        let keywordId;
-        if (existingKeyword.length > 0) {
-          keywordId = existingKeyword[0].keywordId;
-        } else {
-          const newKeywordResult = await dbQuery(
-            `INSERT INTO keywords (keyword) VALUES (?)`,
-            [keyword]
-          );
-          keywordId = newKeywordResult.insertId;
-        }
-
-        await dbQuery(
-          `INSERT INTO productkeywords (productId, keywordId) VALUES (?, ?)`,
-          [productId, keywordId]
-        );
-      }
-    }
-    await dbQuery('COMMIT');
-    console.log('All products and keywords inserted successfully!');
-    allMessages.push('✅ All products and keywords inserted successfully!');
-  } catch (err) {
-    console.error('Error during product insertion:', err);
-    allMessages.push(`❌ Error during product insertion: ${err.message}`);
-    await dbQuery('ROLLBACK');
-    console.error('Transaction rolled back due to error:', err);
-
-    throw err;
-  }
-};
-
-
-
-
-// write e function that takes image url and extracts sales end date from the image using Gemini 1.5 Pro 
-// like in functon formatDataToJson but only for sale end date
-// change the function to ba an api endpoint that takes image url and returns the sale end date in YYYY-MM-DD format
-
-
-
-
-async function extractSaleEndDateFromImage(imageUrl) {
-  console.log('🔍 Extracting sale end date from image using Gemini 1.5 Pro...')
-  const geminiPrompt = `You are an AI assistant that specializes in extracting sale end dates from images of retail flyers.
-  The flyer is in Albanian language and the sale end date is usually written in a specific Europen format.
-Your task is to analyze the image, identify the sale end date, and return it in the format YYYY-MM-DD.  
-
-Look for text patterns that indicate a date, such as "Sale ends on", "Valid until", or similar phrases.
-Return the date in the format YYYY-MM-DD. If no date is found, return "No date found".`;
-  console.log('Image URL:', imageUrl);
-
-  const response = await generativeModel.generateContent({
-    prompt: geminiPrompt,
-    input: {
-      image: {
-        image_url: imageUrl, // Use the image URL directly
-      },
-    },
-    response_format: {
-      type: 'json',
-      schema: {
-        type: 'object',
-        properties: {
-          saleEndDate: {
-            type: 'string',
-            description: 'The extracted sale end date in YYYY-MM-DD format',
-          },
-        },
-      },
-
-    },
-  });
-  console.log('Response from Gemini:', response);
-  const saleEndDate = response.candidates[0].content.saleEndDate;
-  console.log('Extracted Sale End Date:', saleEndDate);
-  return saleEndDate || 'No date found';
-}
-
-// Salvage complete JSON objects from a possibly truncated JSON array string.
-// This helps when the model output is cut off before the final closing brackets.
-function salvageProductsFromTruncatedJsonArray(rawText) {
-  if (!rawText || typeof rawText !== 'string') return [];
-
-  const normalized = rawText.trim();
-  const startIdx = normalized.indexOf('[');
-  if (startIdx === -1) return [];
-
-  const body = normalized.slice(startIdx + 1);
-  const objects = [];
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  let objStart = -1;
-
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === '\\') {
-        escaped = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (ch === '{') {
-      if (depth === 0) objStart = i;
-      depth += 1;
-      continue;
-    }
-
-    if (ch === '}') {
-      if (depth > 0) depth -= 1;
-      if (depth === 0 && objStart !== -1) {
-        const objText = body.slice(objStart, i + 1);
-        try {
-          const parsed = JSON5.parse(objText);
-          if (parsed && typeof parsed === 'object') {
-            objects.push(parsed);
-          }
-        } catch {
-          // Ignore invalid partial object fragments.
-        }
-        objStart = -1;
-      }
-    }
-  }
-
-  return objects;
-}
-
-
-// ...existing code...
-
-/**
- * Updated formatDataToJson to process each image individually:
- * - Loops through each image URL and makes a Gemini call for each image.
- * - Collects and returns all extracted product objects in a single array.
- * - Adds extensive debugging for each step and image.
- */
-async function formatDataToJson(uploadResults, storeId, userId, flyerBookId, postText, postId, imageId, timestamp, options = {}) {
-  const dryRun = parseBooleanFlag(options.dryRun, false);
-  const runLabel = options.runLabel || 'formatDataToJson';
-  const diagnostics = options.diagnostics && typeof options.diagnostics === 'object' ? options.diagnostics : null;
-  if (diagnostics) {
-    if (!Array.isArray(diagnostics.imageResults)) diagnostics.imageResults = [];
-    if (!Array.isArray(diagnostics.errors)) diagnostics.errors = [];
-  }
-
-  const recordImageResult = (result) => {
-    if (!diagnostics) return;
-    diagnostics.imageResults.push(result);
-  };
-
-  const recordError = (error) => {
-    if (!diagnostics) return;
-    diagnostics.errors.push(error);
-  };
-
-  console.log('🔍 [formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...');
-  console.log(`[${runLabel}] dryRun=${dryRun}`);
-  console.log('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
-  console.log('Image ID from formatDataToJson:', imageId); // Log imageId if provided
-
-  allMessages.push('Metadata received: Image URLs:', uploadResults, 'Store ID:', storeId, 'User ID:', userId, 'flyerBookId:', flyerBookId);
-  allMessages.push(`[formatDataToJson] Formatting data into JSON using Gemini 1.5 Pro (one image per call)...`);
-  allMessages.push(`[formatDataToJson] Image URLs: ${JSON.stringify(uploadResults)}`);
-  //for imageId 
-  allMessages.push(`[formatDataToJson] Image ID: ${imageId}`); // Log imageId if provided
-
-
-  // Get today's date in YYYY-MM-DD format
-  const today = new Date();
-  const formattedToday = today.toISOString().split('T')[0];
-  const currentYear = today.getFullYear();
-
-
-  // FORMAT timestmp UNIX TIME STAMP TO YYYY-MM-DD HH:mm:ss format
-  //const date = new Date(timestamp * 1000); // Convert UNIX timestamp to milliseconds
-  //const formattedTimestamp = date.toISOString().split('T')[0] + ' ' + date.toTimeString().split(' ')[0]; // Format to YYYY-MM-DD HH:mm:ss
-  //const formattedTimestamp = new Date(timestamp).toISOString().split('T')[0];
-
-  // const formattedTimestamp = new Date(timestamp * 1000);
-
-  //const formattedTimestamp = date.toString()
-
-
-  // --- FIX: Robust timestamp parsing ---
-  let date;
-  // Check if timestamp is a valid number (for UNIX timestamps)
-  if (typeof timestamp === 'number' && !isNaN(timestamp)) {
-    date = new Date(timestamp * 1000); // Convert UNIX timestamp to milliseconds
-  }
-  // Check if timestamp is a non-empty string (for ISO strings)
-  else if (typeof timestamp === 'string' && timestamp.trim() !== '') {
-    date = new Date(timestamp);
-  }
-  // Fallback if timestamp is null, undefined, or invalid
-  else {
-    console.warn(`[formatDataToJson] Invalid or missing timestamp received. Defaulting to current time.`);
-    date = new Date();
-  }
-
-  // Final check to prevent crash if parsing still fails
-  if (isNaN(date.getTime())) {
-    console.error(`[formatDataToJson] CRITICAL: Failed to parse timestamp '${timestamp}'. Defaulting to current time to avoid crash.`);
-    date = new Date();
-  }
-
-  const formattedTimestamp = date.toISOString().slice(0, 19).replace('T', ' ');
-  // --- END FIX ---
-
-
-  console.log(`[formatDataToJson] Formatted Timestamp: ${formattedTimestamp}`);
-
-  allMessages.push(`[formatDataToJson] Formatted Today: ${formattedToday}`);
-  allMessages.push(`[formatDataToJson] Processing ${uploadResults.length} images individually.`);
-  allMessages.push(`[formatDataToJson] Formatted Timestamp: ${formattedTimestamp}`);
-
-  let allProducts = [];
-
-  for (let i = 0; i < uploadResults.length; i++) {
-    const { uploadedUrl, imageId } = uploadResults[i];
-    const url = uploadedUrl;
-    const origUrl = uploadedUrl;
-    console.log(`🔎 [formatDataToJson] Processing image #${i + 1}:`, url);
-
-    // Compose the Gemini prompt for this image
-    const geminiPrompt =
-      `You are an AI assistant that specializes in extracting structured product sale information from an image of an Albanian retail flyer extracted from Facebook Post.
-
-Your task is to analyze the image, identify distinct product entries, and extract the product description, original price (if present), sale price, and discount percentage for each. A product entry typically consists of a product description and one or two prices. Original prices are usually higher and may be positioned near the sale price.
-
-Analyze the visual layout and text content within the image to determine which elements belong to which product. 
-Look for price patterns (numbers with currency symbols), percentage signs, and descriptive text.
-
-
-
-Bellow is a caregories array with category ids, descriptions and weights. Based on the description of the product, 
-you will assign a category_id to each product that best matches the description of the product
-to the categoryDescription in may belong in the array given.
-
-[
-  {"categoryId": 100, "categoryDescription": "Fruits (Fruta)", "categoryWeight": 80},
-  {"categoryId": 101, "categoryDescription": "Vegetables (Perime)", "categoryWeight": 80},
-  {"categoryId": 102, "categoryDescription": "Herbs (Erëza të Freskëta)", "categoryWeight": 80},
-  {"categoryId": 103, "categoryDescription": "Red Meat (Mish i Kuq)", "categoryWeight": 62},
-  {"categoryId": 104, "categoryDescription": "Poultry (Shpendë)", "categoryWeight": 62},
-  {"categoryId": 105, "categoryDescription": "Processed Meats (Mishra të Përpunuar)", "categoryWeight": 59},
-  {"categoryId": 106, "categoryDescription": "Fresh Fish (Peshk i Freskët)", "categoryWeight": 38},
-  {"categoryId": 107, "categoryDescription": "Frozen Fish & Seafood (Peshk dhe Fruta Deti të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 108, "categoryDescription": "Canned Fish (Peshk i Konservuar)", "categoryWeight": 65},
-  {"categoryId": 109, "categoryDescription": "Milk (Qumësht)", "categoryWeight": 82},
-  {"categoryId": 110, "categoryDescription": "Yogurt (Kos / Jogurt)", "categoryWeight": 82},
-  {"categoryId": 111, "categoryDescription": "Cheese (Djathë)", "categoryWeight": 82},
-  {"categoryId": 112, "categoryDescription": "Cream (Ajkë / Krem Qumështi)", "categoryWeight": 82},
-  {"categoryId": 113, "categoryDescription": "Butter (Gjalpë)", "categoryWeight": 82},
-  {"categoryId": 114, "categoryDescription": "Margarine & Spreads (Margarinë dhe Produkte për Lyerje)", "categoryWeight": 64},
-  {"categoryId": 115, "categoryDescription": "Eggs (Vezë)", "categoryWeight": 82},
-  {"categoryId": 116, "categoryDescription": "Bread (Bukë)", "categoryWeight": 71},
-  {"categoryId": 117, "categoryDescription": "Pastries & Croissants (Pasta dhe Kroasante)", "categoryWeight": 71},
-  {"categoryId": 118, "categoryDescription": "Cakes & Sweet Baked Goods (Kekë dhe Ëmbëlsira Furre)", "categoryWeight": 71},
-  {"categoryId": 119, "categoryDescription": "Flour (Miell)", "categoryWeight": 47},
-  {"categoryId": 120, "categoryDescription": "Rice (Oriz)", "categoryWeight": 65},
-  {"categoryId": 121, "categoryDescription": "Pasta & Noodles (Makarona dhe Fide)", "categoryWeight": 65},
-  {"categoryId": 122, "categoryDescription": "Grains & Cereals (Drithëra)", "categoryWeight": 66},
-  {"categoryId": 123, "categoryDescription": "Sugar & Sweeteners (Sheqer dhe Ëmbëltues)", "categoryWeight": 47},
-  {"categoryId": 124, "categoryDescription": "Salt & Spices (Kripë dhe Erëza)", "categoryWeight": 47},
-  {"categoryId": 125, "categoryDescription": "Cooking Oils (Vajra Gatimi)", "categoryWeight": 64},
-  {"categoryId": 126, "categoryDescription": "Vinegar (Uthull)", "categoryWeight": 64},
-  {"categoryId": 127, "categoryDescription": "Canned Goods (Konserva)", "categoryWeight": 65},
-  {"categoryId": 128, "categoryDescription": "Sauces & Condiments (Salca dhe Kondimente)", "categoryWeight": 64},
-  {"categoryId": 129, "categoryDescription": "Spreads (Produkte për Lyerje)", "categoryWeight": 64},
-  {"categoryId": 130, "categoryDescription": "Chips & Crisps (Çipsa dhe Patatina)", "categoryWeight": 76},
-  {"categoryId": 131, "categoryDescription": "Pretzels & Salty Snacks (Shkopinj të Kripur dhe Rosto të Tjera)", "categoryWeight": 76},
-  {"categoryId": 132, "categoryDescription": "Nuts & Seeds (Fruta të Thata dhe Fara)", "categoryWeight": 76},
-  {"categoryId": 133, "categoryDescription": "Chocolate (Çokollatë)", "categoryWeight": 43},
-  {"categoryId": 134, "categoryDescription": "Biscuits & Cookies (Biskota dhe Keksa)", "categoryWeight": 76},
-  {"categoryId": 135, "categoryDescription": "Candies & Gums (Karamele dhe Çamçakëz)", "categoryWeight": 43},
-  {"categoryId": 136, "categoryDescription": "Frozen Vegetables & Fruits (Perime dhe Fruta të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 137, "categoryDescription": "Frozen Potato Products (Produkte Patatesh të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 138, "categoryDescription": "Frozen Ready Meals & Pizza (Gatime të Gata dhe Pica të Ngrira)", "categoryWeight": 70},
-  {"categoryId": 139, "categoryDescription": "Frozen Meat & Fish (Mish dhe Peshk i Ngrirë)", "categoryWeight": 70},
-  {"categoryId": 140, "categoryDescription": "Ice Cream (Akullore)", "categoryWeight": 70},
-  {"categoryId": 141, "categoryDescription": "Baby Food (Ushqim për Foshnje)", "categoryWeight": 7},
-  {"categoryId": 142, "categoryDescription": "Baby Formula (Qumësht Formule)", "categoryWeight": 7},
-  {"categoryId": 143, "categoryDescription": "Water (Ujë)", "categoryWeight": 53},
-  {"categoryId": 144, "categoryDescription": "Still Water (Ujë Natyral / pa Gaz)", "categoryWeight": 53},
-  {"categoryId": 145, "categoryDescription": "Sparkling Water (Ujë Mineral / me Gaz)", "categoryWeight": 53},
-  {"categoryId": 146, "categoryDescription": "Flavored Water (Ujë me Shije)", "categoryWeight": 53},
-  {"categoryId": 147, "categoryDescription": "Fruit Juices (Lëngje Frutash)", "categoryWeight": 53},
-  {"categoryId": 148, "categoryDescription": "Nectars (Nektare)", "categoryWeight": 53},
-  {"categoryId": 149, "categoryDescription": "Smoothies (Smoothie)", "categoryWeight": 53},
-  {"categoryId": 150, "categoryDescription": "Colas (Kola)", "categoryWeight": 53},
-  {"categoryId": 151, "categoryDescription": "Other Carbonated Drinks (Pije të Tjera të Gazuara)", "categoryWeight": 53},
-  {"categoryId": 152, "categoryDescription": "Coffee (Kafe)", "categoryWeight": 53},
-  {"categoryId": 153, "categoryDescription": "Tea (Çaj)", "categoryWeight": 53},
-  {"categoryId": 154, "categoryDescription": "Energy Drinks (Pije Energjetike)", "categoryWeight": 53},
-  {"categoryId": 155, "categoryDescription": "Alcoholic Beverages (Pije Alkoolike)", "categoryWeight": 29},
-  {"categoryId": 156, "categoryDescription": "Beer (Birrë)", "categoryWeight": 29},
-  {"categoryId": 157, "categoryDescription": "Wine (Verë)", "categoryWeight": 29},
-  {"categoryId": 158, "categoryDescription": "Spirits (Pije Spirtuore)", "categoryWeight": 29},
-  {"categoryId": 159, "categoryDescription": "Laundry Detergents (Detergjentë Rrobash)", "categoryWeight": 59},
-  {"categoryId": 160, "categoryDescription": "Fabric Softeners (Zbutës Rrobash)", "categoryWeight": 59},
-  {"categoryId": 161, "categoryDescription": "Dishwashing Products (Produkte për Larjen e Enëve)", "categoryWeight": 59},
-  {"categoryId": 162, "categoryDescription": "Surface Cleaners (Pastrues Sipërfaqesh)", "categoryWeight": 59},
-  {"categoryId": 163, "categoryDescription": "Toilet Cleaners (Pastrues WC)", "categoryWeight": 59},
-  {"categoryId": 164, "categoryDescription": "Garbage Bags (Thasë Mbeturinash)", "categoryWeight": 59},
-  {"categoryId": 165, "categoryDescription": "Soaps & Shower Gels (Sapunë dhe Xhel Dushi)", "categoryWeight": 50},
-  {"categoryId": 166, "categoryDescription": "Shampoos & Conditioners (Shampon dhe Balsam Flokësh)", "categoryWeight": 50},
-  {"categoryId": 167, "categoryDescription": "Oral Care (Kujdesi Oral)", "categoryWeight": 50},
-  {"categoryId": 168, "categoryDescription": "Deodorants & Antiperspirants (Deodorantë)", "categoryWeight": 50},
-  {"categoryId": 169, "categoryDescription": "Skin Care (Kujdesi i Lëkurës)", "categoryWeight": 50},
-  {"categoryId": 170, "categoryDescription": "Feminine Hygiene (Higjiena Femërore)", "categoryWeight": 50},
-  {"categoryId": 171, "categoryDescription": "Paper Products (Produkte Letre)", "categoryWeight": 59},
-  {"categoryId": 172, "categoryDescription": "Baby Diapers & Wipes (Pelena dhe Letra të Lagura për Foshnje)", "categoryWeight": 7},
-  {"categoryId": 173, "categoryDescription": "Other", "categoryWeight": 1}
-]       
-
-
-
-Extract the sale end dates either from the given post text: "${postText || ''}" or from the image itself. Return it in the format YYYY-MM-DD.
-If there are multiple dates, return the latest one. If the year is missing, use the current year (${currentYear}). If the sale end date is missing, use today's date: ${formattedToday}.
-Format the date in form "YYYY-MM-DD". If sale end date is less than ${formattedToday}, set valid_product to false.
-Populate the sale_end_date field with the sale date found.
-
-For each distinct product entry you identify in the image, create a JSON object in your output array with these exact keys and data types:
-
-* \`product_description\` (string): The complete descriptive text associated with the product in the flyer. Include any size/volume information (e.g., 0,33L, 400ml, 3kg) if it's part of the product's description text in the flyer.
-* \`old_price\` (string or null): The text of the original price (if a higher price is present). Remove currency symbols (€). If no distinct original price is found for a product, use \`null\`.
-* \`new_price\` (string or null): The text of the current sale price (the lower price). Remove currency symbols (€). If no sale price is found, use \`null\`.
-* \`discount_percentage\` (string or null): The numerical value of the discount percentage shown (e.g., "14"). Remove the percentage symbol (%). If no discount percentage is found, use \`null\`.
-* \`sale_end_date\` (string): Use the extracted value from the flyer or post text. Format as "YYYY-MM-DD".
-* \`storeId\` (number): Use the provided value: ${storeId}.
-* \`userId\` (number): Use the provided value: ${userId}.
-* \`postId\` (number): Use the provided value: ${postId}.
-* \`imageId\` (number): Use the provided value: ${imageId}.
-* \`timestamp\` (timestamp): Use the provided value: ${formattedTimestamp}.
-* \`image_url\` (string): Use the current url of the image being processed store in ${url}.
-
-* \`category_id\` (number or null): The numerical value of the categoryId extract from categories array.
-*\`flyer_book_id\` (number or null): Use the provided value: "${flyerBookId}".
-*\`valid_product\` (true or false): A boolean indicating if the product is valid based on the following criteria:
-  - The product description must not be empty.
-  - At least one of the prices (old_price or new_price) must be present.
-  - The sale_end_date must be a valid date in the future (after today).
-
-Also, generate a list of relevant keywords for each product description. These keywords should be in lowercase, in Albanian, 
-and exclude common articles, conjunctions, prepositions, and size/volume information (like 'kg', 'l', 'pako', numbers, units). 
-Only include words longer than 2 characters. Convert the Albanian letter 'ë' to 'e' for all keywords. 
-If there is a keyword like "qumesht" or "qumësht" add a keyword "qumsht" as well to cover both spellings.
-if there is a keyword like "veze" add a keyword "vo" as well to cover both spellings.
-if there is a keyword like "shalqi*" add a keyword "bostan" as well to cover both spellings.
-if there is a keyword like "ver*" add a keyword "vene" as well to cover both spellings.
-if there is a keyword like "qepe" add a keyword "kep" as well to cover both spellings.
-The \`keywords\` field should be an array of strings. Limit the keywords to the most relevant 5 per product.
-
-To reduce response truncation risk:
-- Return at most 25 product objects for one image.
-- Return compact JSON only (no markdown, no prose, no comments, no code fences).
-- If there are more than 25 offers, keep the clearest and most complete ones.
-
-Provide ONLY the JSON array of extracted product objects in your response. Do not include any introductory or concluding text, explanations, or code block markers. Ensure the output is valid JSON.
-`;
-
-    try {
-      // Fetch image buffer and convert to Part format for GoogleGenAI SDK
-      const imagePart = {
-        inlineData: {
-          mimeType: 'image/jpeg',
-          data: Buffer.from(await axios.get(url, { responseType: 'arraybuffer' }).then(res => res.data)).toString('base64'),
-        }
-      };
-
-      const response = await generativeModel.generateContent({
-        model: model,
-        contents: [
-          geminiPrompt,
-          imagePart
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-          topP: 0.8,
-          topK: 40,
-          maxOutputTokens: 8192,
-        }
-      });
-
-      let text = response.text;
-
-      console.log(`[formatDataToJson] Raw Gemini Output for image #${i + 1}:`, text);
-      allMessages.push(`[formatDataToJson] Raw Gemini Output for image #${i + 1}: ${text}`);
-
-      // Clean up potential markdown code block and backticks
-      text = text.replace(/^```json\s*/, '').replace(/\s*```$/, '').replace(/`/g, '');
-
-      try {
-        const products = JSON5.parse(text);
-        console.log(`[formatDataToJson] Parsed JSON for image #${i + 1}:`, products);
-        allMessages.push(`[formatDataToJson] Parsed JSON for image #${i + 1}: ${JSON.stringify(products)}`);
-
-        // Filter out invalid products
-        const validProducts = Array.isArray(products)
-          ? products.filter(product => product.valid_product !== false)
-          : [];
-
-        allMessages.push(`[formatDataToJson] Valid products extracted for image #${i + 1}: ${validProducts}`);
-
-        recordImageResult({
-          storeId,
-          imageId,
-          validProductsCount: validProducts.length,
-          source: 'parsed',
-        });
-
-        // Call the insertion function with the parsed products array
-        if (validProducts.length > 0) {
-          if (dryRun) {
-            console.log(`[${runLabel}] Dry-run active, skipping DB insert for ${validProducts.length} products.`);
-            allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for ${validProducts.length} products.`);
-          } else {
-            await insertProducts1(validProducts);
-          }
-        }
-
-        allProducts = allProducts.concat(validProducts);
-
-      } catch (parseError) {
-        console.error(`[formatDataToJson] JSON Parsing Error for image #${i + 1}:`, parseError);
-        console.error(`[formatDataToJson] Failed JSON Text for image #${i + 1}:`, text);
-        allMessages.push(`[formatDataToJson] JSON Parsing Error for image #${i + 1}: ${parseError.message}`);
-
-        const salvagedProducts = salvageProductsFromTruncatedJsonArray(text);
-        if (salvagedProducts.length > 0) {
-          const validProducts = salvagedProducts.filter(product => product.valid_product !== false);
-          console.log(`[formatDataToJson] Salvaged ${validProducts.length} valid products for image #${i + 1}.`);
-          allMessages.push(`[formatDataToJson] Salvaged ${validProducts.length} valid products for image #${i + 1}.`);
-
-          recordImageResult({
-            storeId,
-            imageId,
-            validProductsCount: validProducts.length,
-            source: 'salvaged',
-          });
-
-          if (validProducts.length > 0) {
-            if (dryRun) {
-              console.log(`[${runLabel}] Dry-run active, skipping DB insert for salvaged ${validProducts.length} products.`);
-              allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for salvaged ${validProducts.length} products.`);
-            } else {
-              await insertProducts1(validProducts);
-            }
-            allProducts = allProducts.concat(validProducts);
-          }
-        } else {
-          // Retry once with an even stricter compact-output instruction.
-          try {
-            const retryPrompt = `${geminiPrompt}\n\nRETRY MODE: Your previous output was truncated/invalid. Return ONLY a compact valid JSON array, max 15 product objects.`;
-            const retryResponse = await generativeModel.generateContent({
-              model: model,
-              contents: [
-                retryPrompt,
-                imagePart
-              ],
-              config: {
-                responseMimeType: 'application/json',
-                temperature: 0.1,
-                topP: 0.8,
-                topK: 40,
-                maxOutputTokens: 8192,
-              }
-            });
-
-            let retryText = retryResponse.text;
-            retryText = retryText.replace(/^```json\s*/, '').replace(/\s*```$/, '').replace(/`/g, '');
-
-            try {
-              const retryProducts = JSON5.parse(retryText);
-              const validRetryProducts = Array.isArray(retryProducts)
-                ? retryProducts.filter(product => product.valid_product !== false)
-                : [];
-
-              recordImageResult({
-                storeId,
-                imageId,
-                validProductsCount: validRetryProducts.length,
-                source: 'retry-parsed',
-              });
-
-              if (validRetryProducts.length > 0) {
-                if (dryRun) {
-                  console.log(`[${runLabel}] Dry-run active, skipping DB insert for retried ${validRetryProducts.length} products.`);
-                  allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for retried ${validRetryProducts.length} products.`);
-                } else {
-                  await insertProducts1(validRetryProducts);
-                }
-                allProducts = allProducts.concat(validRetryProducts);
-                console.log(`[formatDataToJson] Retry succeeded for image #${i + 1} with ${validRetryProducts.length} products.`);
-                allMessages.push(`[formatDataToJson] Retry succeeded for image #${i + 1} with ${validRetryProducts.length} products.`);
-              } else {
-                recordError({
-                  storeId,
-                  imageId,
-                  type: 'json-parse',
-                  message: `${parseError.message} (retry returned 0 valid products)`,
-                });
-                recordImageResult({
-                  storeId,
-                  imageId,
-                  validProductsCount: 0,
-                  source: 'retry-empty',
-                });
-              }
-            } catch (retryParseError) {
-              const retrySalvaged = salvageProductsFromTruncatedJsonArray(retryText);
-              const validRetrySalvaged = retrySalvaged.filter(product => product.valid_product !== false);
-
-              if (validRetrySalvaged.length > 0) {
-                recordImageResult({
-                  storeId,
-                  imageId,
-                  validProductsCount: validRetrySalvaged.length,
-                  source: 'retry-salvaged',
-                });
-
-                if (dryRun) {
-                  console.log(`[${runLabel}] Dry-run active, skipping DB insert for retry-salvaged ${validRetrySalvaged.length} products.`);
-                  allMessages.push(`[${runLabel}] Dry-run active, skipped DB insert for retry-salvaged ${validRetrySalvaged.length} products.`);
-                } else {
-                  await insertProducts1(validRetrySalvaged);
-                }
-                allProducts = allProducts.concat(validRetrySalvaged);
-              } else {
-                recordError({
-                  storeId,
-                  imageId,
-                  type: 'json-parse',
-                  message: `${parseError.message}; retry parse failed: ${retryParseError.message}`,
-                });
-                recordImageResult({
-                  storeId,
-                  imageId,
-                  validProductsCount: 0,
-                  source: 'parse-failed',
-                });
-              }
-            }
-          } catch (retryError) {
-            recordError({
-              storeId,
-              imageId,
-              type: 'json-parse',
-              message: `${parseError.message}; retry API failed: ${retryError.message}`,
-            });
-            recordImageResult({
-              storeId,
-              imageId,
-              validProductsCount: 0,
-              source: 'parse-failed',
-            });
-          }
-        }
-      }
-
-    } catch (error) {
-      console.error(`[formatDataToJson] Gemini API Error for image #${i + 1}:`, error);
-      if (error.details) {
-        console.error('[formatDataToJson] Gemini API Error Details:', error.details);
-      }
-      if (error.message && error.message.includes("400 Bad Request")) {
-        console.error("[formatDataToJson] Possible issue: Incorrect file type or URL for Gemini Vision input.");
-      }
-      allMessages.push(`[formatDataToJson] Gemini API Error for image #${i + 1}: ${error.message}`);
-
-      recordError({
-        storeId,
-        imageId,
-        type: 'gemini-api',
-        message: error.message,
-      });
-
-      recordImageResult({
-        storeId,
-        imageId,
-        validProductsCount: 0,
-        source: 'api-failed',
-      });
-    }
-  }
-
-  console.log('[formatDataToJson] All extracted products:', allProducts);
-  allMessages.push(`[formatDataToJson] All extracted products: ${JSON.stringify(allProducts)}`);
-
-  return allProducts;
-}
-
-// ...existing code...
-
-// **UPDATED** formatDataToJson function to work with image URL
-
-
-
-
-
-
-
-app.put('/rename-image', async (req, res) => {
-  const { public_id, new_name } = req.body;
-  if (!public_id || !new_name) {
-    return res.status(400).json({ error: 'Missing public_id or new_name' });
-  }
-  try {
-    const result = await cloudinary.uploader.rename(public_id, new_name);
-    if (result.result === 'ok') {
-      res.status(200).json({ message: 'Image renamed successfully' });
-    } else {
-      res.status(500).json({ error: 'Failed to rename image' });
-    }
-  }
-  catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-
-app.get('/test', async (req, res) => {
-  res.status(200).json({ message: 'Testing successfully....' });
-});
-
-
-
-
-
-app.get("/getStores", (req, res) => {
-  const q = `SELECT * from stores WHERE facebookPageId > 0 and active = true order by storeId asc`;
-  const userId = req.query.userId;
-  db.query(q, (err, data) => {
-    if (err) {
-      console.log("getStores error:", err);
-      return res.json(err);
-    }
-    return res.json(data);
-  });
-});
-
-
-
-app.get("/getFaceBookStores", (req, res) => {
-  const q = `SELECT * from stores order by storeId WHERE facebookPageId NOT NULL asc`;
-  const userId = req.query.userId;
-  db.query(q, (err, data) => {
-    if (err) {
-      console.log("getStores error:", err);
-      return res.json(err);
-    }
-    return res.json(data);
-  });
-});
-
-
-
-
-// api to get all the image_url that have the same flyer_book_id 
-
-app.get("/getImagesByFlyerBookId", (req, res) => {
-
-  const flyerBookId = req.query.flyerBookId;
-
-  // SELECT ONLY DISTINCT image_url FROM products WHERE flyer_book_id = ?
-
-  const q = `SELECT DISTINCT image_url FROM products WHERE flyer_book_id = ?`;
-
-  db.query(q, [flyerBookId], (err, data) => {
-    if (err) {
-      console.log("getImagesByFlyerBookId error:", err);
-      return res.json(err);
-    }
-    return res.json(data);
-  }
-  );
-});
-
-
-
-app.get("/isFavorite", async (req, res) => { // Added async
-  // Allow checking even if not identified, will just return false
-  const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
-  const productId = parseInt(req.query.productId, 10);
-
-  // If userId isn't numeric here, the live DB may treat favorites.userId as numeric and error.
-  const numericUserId =
-    typeof userId === 'number'
-      ? userId
-      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
-
-  if (!numericUserId || !Number.isFinite(productId) || productId <= 0) {
-    // Cannot check favorite without user and product ID
-    // Technically could check productId only, but usually it's user-specific
-    return res.status(200).json({ isFavorite: false }); // Return false if no user or product ID
-  }
-
-  // Schema-agnostic: favorites table may not have a favoriteId column.
-  const q = `SELECT 1 FROM favorites WHERE userId = ? AND productId = ? LIMIT 1`;
-  try {
-    const result = await queryPromise(q, [numericUserId, productId]);
-    const isFavorite = result.length > 0;
-    res.status(200).json({ isFavorite });
-  } catch (err) {
-    console.error('Error checking favorite:', err);
-    return res.status(500).json({ error: 'Failed to check favorite status' });
-  }
-});
-
-
-// ...existing code...
-
-app.post('/register-push-token', identifyUserMiddleware, async (req, res) => {
-  const { token } = req.body;
-  // IMPORTANT: Use the integer `id` from the user object, not the varchar `userId`.
-  //const userId = req.identifiedUser?.id;
-  const userId = req.identifiedUser?.userId;
-
-  console.log(`[Push] Attempting to register token for user ID: ${userId}`);
-
-  if (!userId || !token) {
-    return res.status(400).json({ error: 'User ID and token are required.' });
-  }
-
-  if (!Expo.isExpoPushToken(token)) {
-    console.error(`Push token ${token} is not a valid Expo push token.`);
-    return res.status(400).json({ error: 'Invalid push token.' });
-  }
-
-  try {
-    const q = 'INSERT INTO push_tokens (user_id, token) VALUES (?, ?) ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)';
-    await queryPromise(q, [userId, token]);
-    console.log(`[Push] Registered token for user ${userId}`);
-    res.status(200).json({ message: 'Token registered successfully.' });
-  } catch (err) {
-    console.error('[Push] Error registering token:', err);
-    res.status(500).json({ error: 'Failed to register token.' });
-  }
-});
-
-// ...existing code...
-
-app.get('/user/preferences', async (req, res) => {
-  if (!req.identifiedUser?.userId) {
-    return res.status(401).json({ error: 'User identification required.' });
-  }
-  try {
-
-
-    console.log(`[API] Getting user preferences for User ID: ${req.identifiedUser.userId}`);
-
-
-    const q = 'SELECT first_name, last_name, email, notification_frequency FROM users WHERE id = ?';
-    const [user] = await queryPromise(q, [req.identifiedUser.userId]);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found.' });
     res.json({
       firstName: user.first_name,
       lastName: user.last_name,
       email: user.email,
-      notificationFrequency: user.notification_frequency
+      notificationFrequency: user.notification_frequency,
     });
   } catch (err) {
-    console.error('[API] Error getting user preferences:', err);
     res.status(500).json({ error: 'Failed to get preferences.' });
   }
 });
 
-// PUT (update) notification preference
-app.put('/user/preferences', async (req, res) => {
-  if (!req.identifiedUser?.userId) {
-    return res.status(401).json({ error: 'User identification required.' });
-  }
+app.put('/user/preferences', requireUser, async (req, res) => {
   const { notificationFrequency } = req.body;
-  const validFrequencies = ['daily', 'weekly', 'monthly', 'off'];
-
-  if (!validFrequencies.includes(notificationFrequency)) {
-    return res.status(400).json({ error: 'Invalid notification frequency value.' });
-  }
-
+  if (!['daily', 'weekly', 'monthly', 'off'].includes(notificationFrequency))
+    return res.status(400).json({ error: 'Invalid frequency.' });
   try {
-    const q = 'UPDATE users SET notification_frequency = ? WHERE id = ?';
-    await queryPromise(q, [notificationFrequency, req.identifiedUser.userId]);
-    res.json({ message: 'Preferences updated successfully.' });
+    await queryPromise('UPDATE users SET notification_frequency = ? WHERE id = ?', [
+      notificationFrequency,
+      req.identifiedUser.userId,
+    ]);
+    res.json({ message: 'Preferences updated.' });
   } catch (err) {
-    console.error('[API] Error updating user preferences:', err);
     res.status(500).json({ error: 'Failed to update preferences.' });
   }
 });
 
-
-// GET user profile information
-app.get('/user/profile', async (req, res) => {
-  if (!req.identifiedUser?.userId) {
-    return res.status(401).json({ error: 'User identification required.' });
-  }
-  try {
-    console.log(`[API] Getting user profile for User ID: ${req.identifiedUser.userId}`);
-    const q = 'SELECT first_name, last_name, email, notification_frequency FROM users WHERE id = ?';
-    const [user] = await queryPromise(q, [req.identifiedUser.userId]);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-    res.json({
-      firstName: user.first_name,
-      lastName: user.last_name,
-      email: user.email,
-      notificationFrequency: user.notification_frequency
-    });
-  } catch (err) {
-    console.error('[API] Error getting user profile:', err);
-    res.status(500).json({ error: 'Failed to get profile.' });
-  }
-});
-
-// PUT (update) user profile information
-app.put('/user/profile', async (req, res) => {
-  if (!req.identifiedUser?.userId) {
-    return res.status(401).json({ error: 'User identification required.' });
-  }
-
-  const { firstName, lastName, email, notificationFrequency } = req.body;
-  const validFrequencies = ['daily', 'weekly', 'monthly', 'off'];
-
-  if (notificationFrequency && !validFrequencies.includes(notificationFrequency)) {
-    return res.status(400).json({ error: 'Invalid notification frequency value.' });
-  }
-
-  try {
-    const q = `
-      UPDATE users 
-      SET first_name = ?, last_name = ?, email = ?, notification_frequency = ? 
-      WHERE id = ?
-    `;
-    await queryPromise(q, [
-      firstName,
-      lastName,
-      email,
-      notificationFrequency,
-      req.identifiedUser.userId
-    ]);
-    res.json({ message: 'Profile updated successfully.' });
-  } catch (err) {
-    console.error('[API] Error updating user profile:', err);
-    res.status(500).json({ error: 'Failed to update profile.' });
-  }
-});
-
-
-// --- NEW: Push Notification Test Endpoint ---
-app.post('/test-push', async (req, res) => {
-  const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID is required.' });
-  }
-
-  console.log(`[Push Test] Received request to send test notification to User ID: ${userId}`);
-
-  try {
-    // 1. Get the push tokens for the specified user
-    const tokenResults = await queryPromise('SELECT token FROM push_tokens WHERE user_id = ?', [userId]);
-
-    if (tokenResults.length === 0) {
-      console.log(`[Push Test] No push tokens found for User ID: ${userId}`);
-      return res.status(404).json({ message: 'No push tokens found for this user.' });
-    }
-
-    const tokens = tokenResults.map(row => row.token);
-    console.log(`[Push Test] Found ${tokens.length} token(s). Preparing to send...`);
-
-    // 2. Create the notification message
-    const messages = [];
-    for (const pushToken of tokens) {
-      if (!Expo.isExpoPushToken(pushToken)) {
-        console.error(`Push token ${pushToken} is not a valid Expo push token.`);
-        continue;
-      }
-      messages.push({
-        to: pushToken,
-        sound: 'default',
-        title: '✅ Test Njoftimi',
-        body: `Ky është një test nga serveri për User ID: ${userId}`,
-        data: { withSome: 'data' },
-      });
-    }
-
-    // 3. Send the notifications
-    const expo = new Expo({ useFcmV1: true });
-    const chunks = expo.chunkPushNotifications(messages);
-    const tickets = [];
-
-    console.log('[Push Test] Sending notification chunks to Expo...');
-    for (let chunk of chunks) {
-      try {
-        let ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-        console.log('[Push Test] Received ticket chunk:', ticketChunk);
-        tickets.push(...ticketChunk);
-      } catch (error) {
-        console.error('[Push Test] Error sending push notification chunk:', error);
-      }
-    }
-    console.log('[Push Test] All chunks sent. Awaiting receipts...');
-
-    // --- NEW: Part 2 - Process the receipts ---
-    // Later, after the Expo push notification service has delivered the
-    // notifications to Apple or Google (usually quickly), you can get
-    // the receipts for each notification and check for errors.
-    let receiptIds = [];
-    for (let ticket of tickets) {
-      // NOTE: Not all tickets have IDs; for example, tickets for notifications
-      // that could not be sent will have error information and no receipt ID.
-      if (ticket.id) {
-        receiptIds.push(ticket.id);
-      }
-    }
-
-    let receiptIdChunks = expo.chunkPushNotificationReceiptIds(receiptIds);
-    for (let chunk of receiptIdChunks) {
-      try {
-        let receipts = await expo.getPushNotificationReceiptsAsync(chunk);
-        console.log('[Push Test] Received receipts:', receipts);
-
-        // The receipts object is a map of ticket IDs to receipt objects.
-        for (let receiptId in receipts) {
-          let { status, message, details } = receipts[receiptId];
-          if (status === 'ok') {
-            continue;
-          } else if (status === 'error') {
-            console.error(
-              `[Push Test] ❌ There was an error sending a notification: ${message}`
-            );
-            if (details && details.error) {
-              // The error codes are listed in the Expo documentation:
-              // https://docs.expo.dev/push-notifications/sending-notifications/#individual-errors
-              // E.g., "DeviceNotRegistered" means you probably need to remove the token from your database.
-              console.error(`[Push Test] ❌ Error details:`, details);
-            }
-          }
-        }
-      } catch (error) {
-        console.error('[Push Test] Error getting push receipts:', error);
-      }
-    }
-
-    res.status(200).json({ message: 'Test notification request processed. Check server logs for details.' });
-
-  } catch (error) {
-    console.error('[Push Test] Error processing test notification request:', error);
-    res.status(500).json({ error: 'Failed to process test notification request.' });
-  }
-});
-
-
-app.post("/addFavorite", async (req, res) => { // Added async
-
-  console.log('Add favorite endpoint hit...');
-
-
-  // The user MUST be identified by the middleware to add a favorite.
-  if (!req.identifiedUser || !req.identifiedUser.userId) {
-    console.error('[API] Error: User identification is required to add a favorite.');
-    return res.status(401).json({ error: 'User identification required.' });
-  }
-
-  const tokenUserId = req.identifiedUser?.userId ?? null;
-  const userId = req.identifiedUser?.id ?? tokenUserId ?? null;
-  const productId = parseInt(req.body?.productId, 10);
-
-  console.log(`[API] Adding favorite for User: tokenUserId=${tokenUserId} resolvedId=${req.identifiedUser?.id} productId=${req.body?.productId}`);
-
-  let numericUserId =
-    typeof userId === 'number'
-      ? userId
-      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
-
-  // If we only have a public token userId (e.g. anon_...), resolve/create a DB user row so
-  // favorites can consistently use the numeric users.id (common schema in this project).
-  if (!numericUserId && typeof tokenUserId === 'string' && tokenUserId.trim() !== '') {
-    try {
-      const existing = await queryPromise(
-        'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
-        [tokenUserId]
-      );
-
-      if (Array.isArray(existing) && existing[0]?.id) {
-        numericUserId = existing[0].id;
-      } else {
-        // Best-effort create; users.userId is not guaranteed unique, so we re-select after insert.
-        await queryPromise(
-          'INSERT INTO users (userId, is_registered, `timestamp`) VALUES (?, ?, NOW())',
-          [tokenUserId, false]
-        );
-        const created = await queryPromise(
-          'SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1',
-          [tokenUserId]
-        );
-        if (Array.isArray(created) && created[0]?.id) {
-          numericUserId = created[0].id;
-        }
-      }
-    } catch (resolveErr) {
-      console.error('[API] Failed to resolve/create numeric user id for favorites:', resolveErr);
-    }
-  }
-
-  if (!numericUserId) {
-    return res.status(401).json({ error: 'User identification required (could not resolve numeric user id).' });
-  }
-
-  if (!Number.isFinite(productId) || productId <= 0) {
-    return res.status(400).json({ error: 'Valid Product ID is required.' });
-  }
-
-  // Idempotent insert even if there's no unique constraint on (userId, productId)
-  const q = `
-    INSERT INTO favorites (userId, productId)
-    SELECT ?, ?
-    WHERE NOT EXISTS (
-      SELECT 1 FROM favorites WHERE userId = ? AND productId = ?
-    )
-  `;
-
-  try {
-    const result = await queryPromise(q, [numericUserId, productId, numericUserId, productId]);
-    const added = Boolean(result?.affectedRows);
-    console.log(`[API] Favorite ${added ? 'added' : 'already existed'} for User ID: ${numericUserId} and Product ID: ${productId}. DB result:`, result);
-    res.status(200).json({ message: added ? 'Favorite added successfully' : 'Favorite already exists', added });
-  } catch (err) {
-    console.error('Error adding favorite:', err);
-    return res.status(500).json({ error: 'Failed to add favorite' });
-  }
-});
-
-app.delete("/removeFavorite", async (req, res) => { // Added async
-  if (!req.identifiedUser || !req.identifiedUser.userId) {
-    return res.status(401).json({ error: 'User identification required to remove favorites.' });
-  }
-  const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
-  const numericUserId =
-    typeof userId === 'number'
-      ? userId
-      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
-
-  console.log(`[API] Removing favorite for User ID: ${userId}`);
-
-  // Get productId from request body OR query parameters
-  const productId = parseInt(req.body?.productId ?? req.query.productId, 10);
-
-  if (!numericUserId) {
-    return res.status(401).json({ error: 'User identification required to remove favorites.' });
-  }
-
-  if (!Number.isFinite(productId) || productId <= 0) {
-    return res.status(400).json({ error: 'Valid Product ID is required.' });
-  }
-
-  const q = `DELETE FROM favorites WHERE userId = ? AND productId = ?`;
-  try {
-    await queryPromise(q, [numericUserId, productId]);
-    console.log(`[API] Favorite removed for User ID: ${numericUserId} and Product ID: ${productId}`);
-    res.status(200).json({ message: 'Favorite removed successfully' });
-  } catch (err) {
-    console.error('Error removing favorite:', err);
-    return res.status(500).json({ error: 'Failed to remove favorite' });
-  }
-});
-
-
-
-
-
-
-app.get("/getUsers", (req, res) => {
-  const q = `SELECT * from users order by userId asc`;
-  const userId = req.query.userId;
-  db.query(q, (err, data) => {
-    if (err) {
-      console.log("getStores error:", err);
-      return res.json(err);
-    }
+// =========================================================================
+// STORE ENDPOINTS
+// =========================================================================
+app.get('/getStores', (req, res) => {
+  db.query('SELECT * from stores WHERE facebookPageId > 0 and active = true order by storeId asc', (err, data) => {
+    if (err) return res.json(err);
     return res.json(data);
   });
 });
 
-app.get("/searchProducts", (req, res) => {
-  const { keyword } = req.query;
-  let q = `
-    SELECT
-      p.productId as productId,
-      p.product_description as product_description,
-      p.old_price as old_price,
-      p.new_price as new_price,
-      p.discount_percentage as discount_percentage,
-      p.sale_end_date as sale_end_date,
-      p.storeId as storeId,
-      p.image_url as image_url,
-      GROUP_CONCAT(k.keyword) AS keywords
-    FROM
-      products p
-    LEFT JOIN
-      productkeywords pk ON p.productId = pk.productId
-    LEFT JOIN
-      keywords k ON pk.keywordId = k.keywordId
-  `;
-  const queryParams = [];
-  if (keyword) {
-    const keywords = keyword.split(' ').map(kw => kw.trim());
-    const keywordConditions = keywords
-      .filter(kw => kw.length > 1)
-      .map(() => `k.keyword LIKE ?`)
-      .join(' OR ');
-    q += ` WHERE ${keywordConditions}`;
-    queryParams.push(...keywords.map(kw => `%${kw}%`));
-  }
-  q += `
-    GROUP BY
-      p.productId
-  `;
-  db.query(q, queryParams, (err, results) => {
-    if (err) {
-      console.error('Error searching products:', err);
-      return res.status(500).json({ error: 'Failed to search products' });
-    }
-    res.status(200).json(results);
-  });
-});
-
-app.post("/addKeyword", (req, res) => {
-  const { productId, keyword } = req.body;
-  const q = `INSERT INTO keywords (keyword) VALUES (?) ON DUPLICATE KEY UPDATE keywordId = LAST_INSERT_ID(keywordId)`;
-  db.query(q, [keyword], (err, result) => {
-    if (err) {
-      console.error('Error adding keyword:', err);
-      return res.status(500).json({ error: 'Failed to add keyword' });
-    }
-    const keywordId = result.insertId;
-    db.query(
-      `INSERT INTO productkeywords (productId, keywordId) VALUES (?, ?)`,
-      [productId, keywordId],
-      (err, result) => {
-        if (err) {
-          console.error('Error adding keyword to product:', err);
-          return res.status(500).json({ error: 'Failed to add keyword to product' });
-        }
-        res.status(200).json({ message: 'Keyword added successfully' });
-      }
-    );
-  });
-});
-
-app.delete("/removeKeyword", (req, res) => {
-  console.log('Remove keyword endpoint hit');
-  console.log('Request body:', req.body);
-  const { productId, keyword } = req.body;
-  db.query(
-    `SELECT keywordId FROM keywords WHERE keyword = ?`,
-    [keyword],
-    (err, result) => {
-      if (err) {
-        console.error('Error getting keywordId:', err);
-        return res.status(500).json({ error: 'Failed to get keywordId' });
-      }
-      const keywordId = result[0]?.keywordId;
-      db.query(
-        `DELETE FROM productkeywords WHERE productId = ? AND keywordId = ?`,
-        [productId, keywordId],
-        (err, result) => {
-          if (err) {
-            console.error('Error removing keyword from product:', err);
-            return res.status(500).json({ error: 'Failed to remove keyword from product' });
-          }
-          res.status(200).json({ message: 'Keyword removed successfully' });
-        }
-      );
-    }
-  );
-});
-
-
-app.put("/updateProductPrices", (req, res) => {
-  const { productId, oldPrice, newPrice } = req.body;
-  const q = `UPDATE products SET old_price = ?, new_price = ? WHERE productId = ?`;
-  db.query(q, [oldPrice, newPrice, productId], (err, result) => {
-    if (err) {
-      console.error('Error updating product prices:', err);
-      return res.status(500).json({ error: 'Failed to update product prices' });
-    }
-    res.status(200).json({ message: 'Product prices updated successfully' });
-  });
-});
-
-
-app.put("/editProductDescription", (req, res) => {
-  const { productId, newDescription } = req.body;
-  const q = `UPDATE products SET product_description = ? WHERE productId = ?`;
-  db.query(q, [newDescription, productId], (err, result) => {
-    if (err) {
-      console.error('Error updating product description:', err);
-      return res.status(500).json({ error: 'Failed to update product description' });
-    }
-    res.status(200).json({ message: 'Product description updated successfully' });
-  });
-});
-
-app.put("/editProductSaleDate", (req, res) => {
-  const { productId, sale_end_date } = req.body;
-  console.log('Received sale_end_date:', sale_end_date);
-  const date = new Date(sale_end_date);
-  const formattedDate = date.toISOString().slice(0, 19).replace('T', ' ');
-  console.log('Formatted date:', formattedDate);
-  const q = `UPDATE products SET sale_end_date = ? WHERE productId = ?`;
-  db.query(q, [formattedDate, productId], (err, result) => {
-    if (err) {
-      console.error('Error updating product description:', err);
-      return res.status(500).json({ error: 'Failed to update product date' });
-    }
-    res.status(200).json({ message: 'Product date updated successfully' });
-  });
-});
-
-
-app.put("/editStore", (req, res) => {
-  const { productId, storeId } = req.body;
-  const q = `UPDATE products SET storeId = ? WHERE productId = ?`;
-  db.query(q, [storeId, productId], (err, result) => {
-    if (err) {
-      console.error('Error updating store :', err);
-      return res.status(500).json({ error: 'Failed to update store' });
-    }
-    res.status(200).json({ message: 'Store updated successfully' });
-  });
-});
-
-// Endpoint to get TOP 100 products and keyword associated with products
-
-app.get("/getProductsWithKeywords", (req, res) => {
-  const q = `
-
-
-
-    SELECT
-      p.productId,
-      p.product_description,
-      p.old_price,
-      p.new_price,
-      p.discount_percentage,
-      p.sale_end_date,
-      p.storeId,
-      p.image_url,
-      GROUP_CONCAT(k.keyword SEPARATOR ', ') AS keywords
-    FROM
-      products p
-    LEFT JOIN
-      productkeywords pk ON p.productId = pk.productId
-    LEFT JOIN
-      keywords k ON pk.keywordId = k.keywordId
-    GROUP BY
-      p.productId
-
-    ORDER BY
-      p.productId desc
-
-LIMIT 100
-  `;
-  db.query(q, (err, data) => {
-    if (err) {
-      console.error('Error fetching products with keywords:', err);
-      return res.status(500).json({ error: 'Failed to fetch products with keywords' });
-    }
-
-
-    console.log('Fetched products with keywords:', data);
-
+app.get('/getFaceBookStores', (req, res) => {
+  db.query('SELECT * from stores WHERE facebookPageId IS NOT NULL ORDER BY storeId ASC', (err, data) => {
+    if (err) return res.json(err);
     return res.json(data);
   });
 });
 
-
-
-app.get("/getProducts", async (req, res) => {
-  console.log('getProducts endpoint hit');
+// =========================================================================
+// PRODUCT ENDPOINTS (original paths preserved)
+// =========================================================================
+app.get('/getProducts', async (req, res) => {
   const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
   const numericUserId =
     typeof userId === 'number'
       ? userId
-      : (typeof userId === 'string' && /^\d+$/.test(userId) ? parseInt(userId, 10) : null);
+      : typeof userId === 'string' && /^\d+$/.test(userId)
+        ? parseInt(userId, 10)
+        : null;
 
-  // Support single storeId OR comma-separated list of storeIds (client may send CSV)
-  const storeIdsParam = req.query.storeId || req.query.storeIds || "";
+  const storeIdsParam = req.query.storeId || req.query.storeIds || '';
   let storeIds = null;
-  if (storeIdsParam && typeof storeIdsParam === "string") {
+  if (storeIdsParam && typeof storeIdsParam === 'string') {
     const parsed = storeIdsParam
-      .split(",")
+      .split(',')
       .map((s) => parseInt(s.trim(), 10))
       .filter(Number.isFinite);
-    if (parsed.length > 0) storeIds = parsed; // array of integers
+    if (parsed.length > 0) storeIds = parsed;
   }
 
   const isFavoriteQueryParam = req.query.isFavorite === 'true';
   const onSale = req.query.onSale === 'true';
-  const keywordQuery = req.query.keyword || null; // Renamed to avoid conflict with table alias 'k'
+  const keywordQuery = req.query.keyword || null;
   const page = parseInt(req.query.page, 10) || 1;
   const limit = parseInt(req.query.limit, 10) || 20;
   const offset = (page - 1) * limit;
   const today = new Date().toISOString().split('T')[0];
 
-  // --- MODIFICATION START: Prepare for matched_keyword_count ---
-  const searchKeywordsArray = keywordQuery ? keywordQuery.split(' ').map(kw => kw.trim()).filter(kw => kw.length > 1) : [];
-  let matchedKeywordCountSelectSQL = '0 AS matched_keyword_count'; // Default value
-  const paramsForMatchedKeywordCountSubquery = []; // Parameters for the subquery in SELECT
+  const searchKeywordsArray = keywordQuery
+    ? keywordQuery
+        .split(' ')
+        .map((kw) => kw.trim())
+        .filter((kw) => kw.length > 1)
+    : [];
+  let matchedKeywordCountSelectSQL = '0 AS matched_keyword_count';
+  const paramsForMatchedKeywordCountSubquery = [];
 
   if (searchKeywordsArray.length > 0) {
     const matchConditionsForSubquery = searchKeywordsArray.map(() => `sk_match.keyword LIKE ?`).join(' OR ');
-    matchedKeywordCountSelectSQL = `
-      (
-        SELECT COUNT(DISTINCT sk_match.keywordId)
-        FROM productkeywords pk_match
-        JOIN keywords sk_match ON pk_match.keywordId = sk_match.keywordId
-        WHERE pk_match.productId = p.productId AND (${matchConditionsForSubquery})
-      ) AS matched_keyword_count
-    `;
-    searchKeywordsArray.forEach(kw => paramsForMatchedKeywordCountSubquery.push(`${kw}%`));
+    matchedKeywordCountSelectSQL = `(SELECT COUNT(DISTINCT sk_match.keywordId) FROM productkeywords pk_match JOIN keywords sk_match ON pk_match.keywordId = sk_match.keywordId WHERE pk_match.productId = p.productId AND (${matchConditionsForSubquery})) AS matched_keyword_count`;
+    searchKeywordsArray.forEach((kw) => paramsForMatchedKeywordCountSubquery.push(`${kw}%`));
   }
-  // --- Modification end ---
 
-  let fromAndJoins = `
-    FROM
-      products p
-    LEFT JOIN stores s ON p.storeId = s.storeId
-    LEFT JOIN productkeywords pk ON p.productId = pk.productId
-    LEFT JOIN productcategories pc ON p.category_id = pc.categoryId
-    LEFT JOIN keywords k ON pk.keywordId = k.keywordId
-    ${numericUserId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}
-  `;
+  let fromAndJoins = `FROM products p LEFT JOIN stores s ON p.storeId = s.storeId LEFT JOIN productkeywords pk ON p.productId = pk.productId LEFT JOIN productcategories pc ON p.category_id = pc.categoryId LEFT JOIN keywords k ON pk.keywordId = k.keywordId ${numericUserId ? `LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ?` : ''}`;
 
-  // Main SELECT statement including the dynamic matched_keyword_count
-  let q = `
-    SELECT
-      p.productId, p.product_description, p.old_price, p.new_price,
-      p.discount_percentage, p.sale_end_date, p.storeId, p.image_url,
-      s.storeName, s.logoUrl, p.flyer_book_id,
-      ANY_VALUE(pc.categoryWeight) AS categoryWeight,
-      GROUP_CONCAT(DISTINCT k.keyword SEPARATOR ',') AS keywords,
-      ${matchedKeywordCountSelectSQL},
-      ${numericUserId ? 'CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END' : 'FALSE'} AS isFavorite,
-      CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale
-    ${fromAndJoins}
-  `;
+  let q = `SELECT p.productId, p.product_description, p.old_price, p.new_price, p.discount_percentage, p.sale_end_date, p.storeId, p.image_url, s.storeName, s.logoUrl, p.flyer_book_id, ANY_VALUE(pc.categoryWeight) AS categoryWeight, GROUP_CONCAT(DISTINCT k.keyword SEPARATOR ',') AS keywords, ${matchedKeywordCountSelectSQL}, ${numericUserId ? 'CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END' : 'FALSE'} AS isFavorite, CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale ${fromAndJoins}`;
 
-  // Build parameters for the SELECT part first
   const selectParams = [];
-  selectParams.push(...paramsForMatchedKeywordCountSubquery); // Params for the subquery
-  selectParams.push(today); // For productOnSale CASE WHEN
-  if (numericUserId) {
-    selectParams.push(numericUserId); // For isFavorite CASE WHEN (and the JOIN if numericUserId is present)
-  }
+  selectParams.push(...paramsForMatchedKeywordCountSubquery);
+  selectParams.push(today);
+  if (numericUserId) selectParams.push(numericUserId);
 
-  // Build WHERE clause conditions and parameters
   let conditions = [];
   const whereParams = [];
 
-  // If storeIds is an array use IN(...) ; otherwise no store filter
   if (Array.isArray(storeIds) && storeIds.length > 0) {
     const placeholders = storeIds.map(() => '?').join(',');
     conditions.push(`p.storeId IN (${placeholders})`);
@@ -3080,8 +467,10 @@ app.get("/getProducts", async (req, res) => {
   }
 
   if (isFavoriteQueryParam && numericUserId) {
-    conditions.push(`EXISTS (SELECT 1 FROM favorites fav_sub WHERE fav_sub.productId = p.productId AND fav_sub.userId = ?)`);
-    whereParams.push(numericUserId); // This userId is for the EXISTS subquery condition
+    conditions.push(
+      `EXISTS (SELECT 1 FROM favorites fav_sub WHERE fav_sub.productId = p.productId AND fav_sub.userId = ?)`,
+    );
+    whereParams.push(numericUserId);
   }
 
   if (onSale) {
@@ -3090,26 +479,20 @@ app.get("/getProducts", async (req, res) => {
   }
 
   if (searchKeywordsArray.length > 0) {
-    // These conditions are for filtering rows (WHERE clause)
     const keywordTableConditions = searchKeywordsArray.map(() => `k.keyword LIKE ?`).join(' OR ');
-    const descriptionConditions = searchKeywordsArray.map(() => `p.product_description LIKE ?`).join(' OR ');
-    conditions.push(`((${keywordTableConditions}) OR (${descriptionConditions}))`);
-    searchKeywordsArray.forEach(kw => whereParams.push(`${kw}%`)); // Params for k.keyword in WHERE
-    searchKeywordsArray.forEach(kw => whereParams.push(`${kw}%`)); // Params for p.product_description in WHERE
+    const descConditions = searchKeywordsArray.map(() => `p.product_description LIKE ?`).join(' OR ');
+    conditions.push(`((${keywordTableConditions}) OR (${descConditions}))`);
+    searchKeywordsArray.forEach((kw) => {
+      whereParams.push(`${kw}%`);
+    });
+    searchKeywordsArray.forEach((kw) => {
+      whereParams.push(`${kw}%`);
+    });
   }
 
-  if (conditions.length > 0) {
-    q += ' WHERE ' + conditions.join(' AND ');
-  }
+  if (conditions.length > 0) q += ' WHERE ' + conditions.join(' AND ');
 
-  // Add GROUP BY, ORDER BY, and LIMIT/OFFSET
-  q += `
-    GROUP BY p.productId ${matchedKeywordCountSelectSQL !== '0 AS matched_keyword_count' ? '' : ''} 
-    ORDER BY matched_keyword_count DESC,  productOnSale DESC , categoryWeight DESC, p.productId DESC
-    LIMIT ? OFFSET ?
-  `;
-
-  // Combine all parameters in the correct order
+  q += ` GROUP BY p.productId ORDER BY matched_keyword_count DESC, productOnSale DESC, categoryWeight DESC, p.productId DESC LIMIT ? OFFSET ?`;
   const finalParams = [...selectParams, ...whereParams, limit, offset];
 
   try {
@@ -3117,13 +500,11 @@ app.get("/getProducts", async (req, res) => {
     const nextPage = data.length === limit ? page + 1 : null;
     return res.json({ data, nextPage });
   } catch (err) {
-    console.log("getProducts error:", err);
-    return res.status(500).json({ error: "Failed to retrieve products" });
+    return res.status(500).json({ error: 'Failed to retrieve products' });
   }
 });
-// ...existing code...
 
-app.get("/getProductsDashboard", async (req, res) => {
+app.get('/getProductsDashboard', async (req, res) => {
   const userId = parseInt(req.query.userId, 10) || null;
   let storeId = parseInt(req.query.storeId, 10);
   const isFavorite = req.query.isFavorite || null;
@@ -3133,133 +514,350 @@ app.get("/getProductsDashboard", async (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 10;
   const offset = (page - 1) * limit;
   const today = new Date().toISOString().split('T')[0];
+  if (isNaN(storeId) || storeId <= 0) storeId = null;
 
-  if (isNaN(storeId) || storeId <= 0) {
-    storeId = null;
-  }
-
-  let q = `
-    SELECT
-      p.productId,
-      p.product_description,
-      p.old_price,
-      p.new_price,
-      p.discount_percentage,
-      p.sale_end_date,
-      p.storeId,
-      p.image_url,
-      s.storeName,
-      GROUP_CONCAT(k.keyword) AS keywords,
-      CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END AS isFavorite,
-      CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale,
-      (
-        SELECT COUNT(*)
-        FROM productkeywords pkf
-        JOIN keywords kf ON pkf.keywordId = kf.keywordId
-        WHERE pkf.productId = p.productId
-          AND kf.keyword IN (
-            SELECT k.keyword
-            FROM favorites f
-            JOIN productkeywords pk ON f.productId = pk.productId
-            JOIN keywords k ON pk.keywordId = k.keywordId
-            WHERE f.userId = ?
-          )
-      ) AS keywordMatchCount
-    FROM
-      products p
-    LEFT JOIN
-      productkeywords pk ON p.productId = pk.productId
-    LEFT JOIN
-      keywords k ON pk.keywordId = k.keywordId
-    LEFT JOIN
-      favorites f ON p.productId = f.productId AND f.userId = ?
-    LEFT JOIN
-      stores s ON p.storeId = s.storeId
-  `;
+  let q = `SELECT p.productId, p.product_description, p.old_price, p.new_price, p.discount_percentage, p.sale_end_date, p.storeId, p.image_url, s.storeName, GROUP_CONCAT(k.keyword) AS keywords, CASE WHEN f.userId IS NOT NULL THEN TRUE ELSE FALSE END AS isFavorite, CASE WHEN p.sale_end_date >= ? THEN TRUE ELSE FALSE END AS productOnSale, (SELECT COUNT(*) FROM productkeywords pkf JOIN keywords kf ON pkf.keywordId = kf.keywordId WHERE pkf.productId = p.productId AND kf.keyword IN (SELECT k.keyword FROM favorites f_sub JOIN productkeywords pk ON f_sub.productId = pk.productId JOIN keywords k ON pk.keywordId = k.keywordId WHERE f_sub.userId = ?)) AS keywordMatchCount FROM products p LEFT JOIN productkeywords pk ON p.productId = pk.productId LEFT JOIN keywords k ON pk.keywordId = k.keywordId LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ? LEFT JOIN stores s ON p.storeId = s.storeId`;
 
   const params = [today, userId, userId];
   let conditions = [];
   if (storeId !== null) {
-    conditions.push(`p.storeId = ?`);
+    conditions.push('p.storeId = ?');
     params.push(storeId);
   }
-
   if (isFavorite && isFavorite.trim() === 'true') {
-    console.log('isFavorite condition hit');
-    conditions.push(`f.userId = ?`);
+    conditions.push('f.userId = ?');
     params.push(userId);
   }
-
   if (onSale === 'true') {
-    conditions.push(`p.sale_end_date >= ?`);
+    conditions.push('p.sale_end_date >= ?');
     params.push(today);
   }
-
   if (keyword) {
-    const keywords = keyword.split(' ').map(kw => kw.trim());
-    const keywordConditions = keywords
-      .filter(kw => kw.length > 1)
-      .map(() => `k.keyword LIKE ?`)
+    const keywords = keyword.split(' ').map((kw) => kw.trim());
+    const kwConditions = keywords
+      .filter((kw) => kw.length > 1)
+      .map(() => 'k.keyword LIKE ?')
       .join(' OR ');
-    if (keywordConditions.length > 0) {
-      conditions.push(`(${keywordConditions})`);
-      params.push(...keywords.map(kw => `%${kw}%`));
+    if (kwConditions.length > 0) {
+      conditions.push(`(${kwConditions})`);
+      params.push(...keywords.map((kw) => `%${kw}%`));
     }
   }
 
-  if (conditions.length > 0) {
-    q += ' WHERE ' + conditions.join(' AND ');
-  }
-
-  q += `
-    GROUP BY
-      p.productId
-    ORDER BY
-      p.productId DESC,
-      productOnSale DESC,
-      isFavorite DESC,
-      keywordMatchCount DESC
-    LIMIT ? OFFSET ?
-  `;
+  if (conditions.length > 0) q += ' WHERE ' + conditions.join(' AND ');
+  q += ` GROUP BY p.productId ORDER BY p.productId DESC, productOnSale DESC, isFavorite DESC, keywordMatchCount DESC LIMIT ? OFFSET ?`;
   params.push(limit, offset);
 
   db.query(q, params, (err, data) => {
-    if (err) {
-      console.log("getProducts error:", err);
-      return res.json(err);
-    }
+    if (err) return res.json(err);
     const nextPage = data.length === limit ? page + 1 : null;
     return res.json({ data, nextPage });
   });
 });
 
-
-app.delete('/delete-image', async (req, res) => {
-  const { public_id } = req.body;
-  if (!public_id) {
-    return res.status(400).json({ error: 'Missing public_id' });
-  }
+app.delete('/deleteProduct/:productId', async (req, res) => {
+  const productId = req.params.productId;
+  const dbQuery = (q, p) =>
+    new Promise((resolve, reject) => {
+      db.query(q, p, (e, r) => {
+        if (e) return reject(e);
+        resolve(r);
+      });
+    });
   try {
-    const result = await cloudinary.uploader.destroy(public_id);
-    if (result.result === 'ok') {
-      res.status(200).json({ message: 'Image deleted successfully' });
-    } else {
-      res.status(500).json({ error: 'Failed to delete image' });
+    await dbQuery('START TRANSACTION');
+    await dbQuery('DELETE FROM productkeywords WHERE productId = ?', [productId]);
+    await dbQuery('DELETE FROM keywords WHERE keywordId NOT IN (SELECT keywordId FROM productkeywords)');
+    await dbQuery('DELETE FROM products WHERE productId = ?', [productId]);
+    await dbQuery('COMMIT');
+    res.status(200).json({ message: 'Product and related data deleted successfully.' });
+  } catch (error) {
+    await dbQuery('ROLLBACK');
+    res.status(500).json({ message: 'An error occurred while deleting the product.' });
+  }
+});
+
+app.put('/updateProductPrices', (req, res) => {
+  const { productId, oldPrice, newPrice } = req.body;
+  db.query(
+    'UPDATE products SET old_price = ?, new_price = ? WHERE productId = ?',
+    [oldPrice, newPrice, productId],
+    (err) => {
+      if (err) return res.status(500).json({ error: 'Failed to update prices' });
+      res.status(200).json({ message: 'Prices updated successfully' });
+    },
+  );
+});
+
+app.put('/editProductDescription', (req, res) => {
+  const { productId, newDescription } = req.body;
+  db.query('UPDATE products SET product_description = ? WHERE productId = ?', [newDescription, productId], (err) => {
+    if (err) return res.status(500).json({ error: 'Failed to update description' });
+    res.status(200).json({ message: 'Description updated successfully' });
+  });
+});
+
+app.put('/editProductSaleDate', (req, res) => {
+  const { productId, sale_end_date } = req.body;
+  const formattedDate = new Date(sale_end_date).toISOString().slice(0, 19).replace('T', ' ');
+  db.query('UPDATE products SET sale_end_date = ? WHERE productId = ?', [formattedDate, productId], (err) => {
+    if (err) return res.status(500).json({ error: 'Failed to update date' });
+    res.status(200).json({ message: 'Date updated successfully' });
+  });
+});
+
+app.put('/editStore', (req, res) => {
+  const { productId, storeId } = req.body;
+  db.query('UPDATE products SET storeId = ? WHERE productId = ?', [storeId, productId], (err) => {
+    if (err) return res.status(500).json({ error: 'Failed to update store' });
+    res.status(200).json({ message: 'Store updated successfully' });
+  });
+});
+
+app.get('/getProductsWithKeywords', (req, res) => {
+  db.query(
+    "SELECT p.productId, p.product_description, p.old_price, p.new_price, p.discount_percentage, p.sale_end_date, p.storeId, p.image_url, GROUP_CONCAT(k.keyword SEPARATOR ', ') AS keywords FROM products p LEFT JOIN productkeywords pk ON p.productId = pk.productId LEFT JOIN keywords k ON pk.keywordId = k.keywordId GROUP BY p.productId ORDER BY p.productId desc LIMIT 100",
+    (err, data) => {
+      if (err) return res.status(500).json({ error: 'Failed to fetch' });
+      return res.json(data);
+    },
+  );
+});
+
+app.get('/searchProducts', (req, res) => {
+  const { keyword } = req.query;
+  let q =
+    'SELECT p.productId, p.product_description, p.old_price, p.new_price, p.discount_percentage, p.sale_end_date, p.storeId, p.image_url, GROUP_CONCAT(k.keyword) AS keywords FROM products p LEFT JOIN productkeywords pk ON p.productId = pk.productId LEFT JOIN keywords k ON pk.keywordId = k.keywordId';
+  const queryParams = [];
+  if (keyword) {
+    const keywords = keyword.split(' ').map((kw) => kw.trim());
+    const kwConditions = keywords
+      .filter((kw) => kw.length > 1)
+      .map(() => 'k.keyword LIKE ?')
+      .join(' OR ');
+    q += ` WHERE ${kwConditions}`;
+    queryParams.push(...keywords.map((kw) => `%${kw}%`));
+  }
+  q += ' GROUP BY p.productId';
+  db.query(q, queryParams, (err, results) => {
+    if (err) return res.status(500).json({ error: 'Failed to search' });
+    res.status(200).json(results);
+  });
+});
+
+app.post('/addKeyword', (req, res) => {
+  const { productId, keyword } = req.body;
+  db.query(
+    'INSERT INTO keywords (keyword) VALUES (?) ON DUPLICATE KEY UPDATE keywordId = LAST_INSERT_ID(keywordId)',
+    [keyword],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'Failed to add keyword' });
+      const keywordId = result.insertId;
+      db.query('INSERT INTO productkeywords (productId, keywordId) VALUES (?, ?)', [productId, keywordId], (err) => {
+        if (err) return res.status(500).json({ error: 'Failed to add keyword to product' });
+        res.status(200).json({ message: 'Keyword added successfully' });
+      });
+    },
+  );
+});
+
+app.delete('/removeKeyword', (req, res) => {
+  const { productId, keyword } = req.body;
+  db.query('SELECT keywordId FROM keywords WHERE keyword = ?', [keyword], (err, result) => {
+    if (err) return res.status(500).json({ error: 'Failed to get keywordId' });
+    const keywordId = result[0]?.keywordId;
+    db.query('DELETE FROM productkeywords WHERE productId = ? AND keywordId = ?', [productId, keywordId], (err) => {
+      if (err) return res.status(500).json({ error: 'Failed to remove keyword' });
+      res.status(200).json({ message: 'Keyword removed successfully' });
+    });
+  });
+});
+
+app.get('/products-by-ids', async (req, res) => {
+  const { ids } = req.query;
+  const userId = req.identifiedUser ? req.identifiedUser.userId : null;
+  if (!ids) return res.status(400).json({ error: 'Product IDs are required.' });
+  const productIds = ids
+    .split(',')
+    .map((id) => parseInt(id.trim(), 10))
+    .filter(Number.isFinite);
+  if (productIds.length === 0) return res.status(400).json({ error: 'No valid product IDs provided.' });
+  try {
+    const products = await queryPromise(
+      'SELECT p.*, f.userId IS NOT NULL AS isFavorite FROM products p LEFT JOIN favorites f ON p.productId = f.productId AND f.userId = ? WHERE p.productId IN (?)',
+      [userId, productIds],
+    );
+    res.status(200).json(products);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch products.' });
+  }
+});
+
+app.get('/isFavorite', async (req, res) => {
+  const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
+  const productId = parseInt(req.query.productId, 10);
+  const numUserId =
+    typeof userId === 'number'
+      ? userId
+      : typeof userId === 'string' && /^\d+$/.test(userId)
+        ? parseInt(userId, 10)
+        : null;
+  if (!numUserId || !Number.isFinite(productId) || productId <= 0) return res.status(200).json({ isFavorite: false });
+  try {
+    const result = await queryPromise('SELECT 1 FROM favorites WHERE userId = ? AND productId = ? LIMIT 1', [
+      numUserId,
+      productId,
+    ]);
+    res.status(200).json({ isFavorite: result.length > 0 });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to check favorite' });
+  }
+});
+
+app.post('/addFavorite', async (req, res) => {
+  if (!req.identifiedUser || !req.identifiedUser.userId)
+    return res.status(401).json({ error: 'User identification required.' });
+  const tokenUserId = req.identifiedUser?.userId ?? null;
+  const userId = req.identifiedUser?.id ?? tokenUserId ?? null;
+  const productId = parseInt(req.body?.productId, 10);
+  let numUserId =
+    typeof userId === 'number'
+      ? userId
+      : typeof userId === 'string' && /^\d+$/.test(userId)
+        ? parseInt(userId, 10)
+        : null;
+
+  if (!numUserId && typeof tokenUserId === 'string' && tokenUserId.trim() !== '') {
+    try {
+      const existing = await queryPromise('SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1', [
+        tokenUserId,
+      ]);
+      if (Array.isArray(existing) && existing[0]?.id) {
+        numUserId = existing[0].id;
+      } else {
+        await queryPromise('INSERT INTO users (userId, is_registered, `timestamp`) VALUES (?, ?, NOW())', [
+          tokenUserId,
+          false,
+        ]);
+        const created = await queryPromise('SELECT id FROM users WHERE userId = ? ORDER BY id DESC LIMIT 1', [
+          tokenUserId,
+        ]);
+        if (Array.isArray(created) && created[0]?.id) numUserId = created[0].id;
+      }
+    } catch (resolveErr) {
+      logger.error('Failed to resolve user id:', resolveErr);
     }
+  }
+
+  if (!numUserId) return res.status(401).json({ error: 'User identification required.' });
+  if (!Number.isFinite(productId) || productId <= 0)
+    return res.status(400).json({ error: 'Valid Product ID is required.' });
+
+  try {
+    const result = await queryPromise(
+      'INSERT INTO favorites (userId, productId) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM favorites WHERE userId = ? AND productId = ?)',
+      [numUserId, productId, numUserId, productId],
+    );
+    const added = Boolean(result?.affectedRows);
+    res.status(200).json({ message: added ? 'Favorite added successfully' : 'Favorite already exists', added });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to add favorite' });
+  }
+});
+
+app.delete('/removeFavorite', async (req, res) => {
+  if (!req.identifiedUser || !req.identifiedUser.userId)
+    return res.status(401).json({ error: 'User identification required.' });
+  const userId = req.identifiedUser?.id ?? req.identifiedUser?.userId ?? null;
+  const numUserId =
+    typeof userId === 'number'
+      ? userId
+      : typeof userId === 'string' && /^\d+$/.test(userId)
+        ? parseInt(userId, 10)
+        : null;
+  if (!numUserId) return res.status(401).json({ error: 'User identification required.' });
+  const productId = parseInt(req.body?.productId ?? req.query.productId, 10);
+  if (!Number.isFinite(productId) || productId <= 0)
+    return res.status(400).json({ error: 'Valid Product ID is required.' });
+  try {
+    await queryPromise('DELETE FROM favorites WHERE userId = ? AND productId = ?', [numUserId, productId]);
+    res.status(200).json({ message: 'Favorite removed successfully' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to remove favorite' });
+  }
+});
+
+app.get('/getImagesByFlyerBookId', (req, res) => {
+  db.query('SELECT DISTINCT image_url FROM products WHERE flyer_book_id = ?', [req.query.flyerBookId], (err, data) => {
+    if (err) return res.json(err);
+    return res.json(data);
+  });
+});
+
+// =========================================================================
+// CLOUDINARY ENDPOINTS (original paths preserved)
+// =========================================================================
+const upload = multer({ dest: 'uploads/' });
+
+app.get('/media-library-json', async (req, res) => {
+  const mediaJson = await listAllMediaFiles();
+  res.json(mediaJson);
+});
+
+app.put('/rename-image', async (req, res) => {
+  const { public_id, new_name } = req.body;
+  if (!public_id || !new_name) return res.status(400).json({ error: 'Missing public_id or new_name' });
+  try {
+    const cloudinary = (await import('./cloudinaryConfig.js')).default;
+    const result = await cloudinary.uploader.rename(public_id, new_name);
+    if (result.result === 'ok') res.status(200).json({ message: 'Image renamed successfully' });
+    else res.status(500).json({ error: 'Failed to rename image' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+app.delete('/delete-image', async (req, res) => {
+  const { public_id } = req.body;
+  if (!public_id) return res.status(400).json({ error: 'Missing public_id' });
+  try {
+    const cloudinary = (await import('./cloudinaryConfig.js')).default;
+    const result = await cloudinary.uploader.destroy(public_id);
+    if (result.result === 'ok') res.status(200).json({ message: 'Image deleted successfully' });
+    else res.status(500).json({ error: 'Failed to delete image' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-
-
+app.post('/upload', upload.array('images', 10), async (req, res) => {
+  try {
+    const cloudinary = (await import('./cloudinaryConfig.js')).default;
+    const fs = (await import('fs')).default;
+    const uploadPromises = req.files.map(async (file) => {
+      const imagePath = file.path;
+      const result = await cloudinary.uploader.upload(imagePath, {
+        folder: req.body.folderName || 'default-folder',
+        use_filename: true,
+        unique_filename: false,
+        overwrite: true,
+        transformation: [{ fetch_format: 'webp', quality: 'auto' }],
+      });
+      fs.unlinkSync(imagePath);
+      return { success: true, url: result.secure_url, public_id: result.public_id, format: result.format };
+    });
+    const images = await Promise.all(uploadPromises);
+    res.json({ success: true, images });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to upload image' });
+  }
+});
 
 app.post('/upload-multiple', upload.array('images', 10), async (req, res) => {
-  const { folderName, storeId } = req.body;
-  console.log('folderName:', folderName);
-  console.log('storeId:', storeId);
   try {
+    const cloudinary = (await import('./cloudinaryConfig.js')).default;
+    const fs = (await import('fs')).default;
+    const { folderName, storeId } = req.body;
     const uploadPromises = req.files.map(async (file) => {
       const imagePath = file.path;
       const result = await cloudinary.uploader.upload(imagePath, {
@@ -3267,166 +865,99 @@ app.post('/upload-multiple', upload.array('images', 10), async (req, res) => {
         use_filename: true,
         unique_filename: false,
       });
-      console.log('result from upload:', result.public_id);
       const publicId = result.public_id;
       const imageName = publicId.split('/').pop();
-      const transformationResult = await cloudinary.uploader.upload(publicId, {
+      await cloudinary.uploader.upload(publicId, {
         type: 'upload',
         overwrite: true,
         transformation: [
           {
-            overlay: {
-              font_family: 'Arial',
-              font_size: 30,
-              padding: 10,
-              text: '#' + imageName + ' ' + '@' + storeId,
-            },
+            overlay: { font_family: 'Arial', font_size: 30, text: '#' + imageName + ' @' + storeId },
             gravity: 'north',
             y: -30,
-            x: 10
-          }
+            x: 10,
+          },
         ],
       });
-      console.log('Transformed image URL:', transformationResult.secure_url);
-      const options = {
-        url: transformationResult.secure_url,
-        dest: '../../downloads/',
-      };
-      download.image(options)
-        .then(({ filename }) => {
-          console.log('Saved to', filename);
-        })
-        .catch((err) => console.error(err));
       fs.unlinkSync(imagePath);
       return { success: true, url: result.secure_url, public_id: result.public_id, format: result.format };
     });
     const results = await Promise.all(uploadPromises);
     res.json(results);
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to upload image' });
+    res.status(500).json({ success: false, error: 'Failed to upload images' });
   }
 });
 
-app.post('/upload', upload.array('images', 10), async (req, res) => {
+// =========================================================================
+// MISC ENDPOINTS
+// =========================================================================
+app.get('/getUsers', (req, res) => {
+  db.query('SELECT * from users order by userId asc', (err, data) => {
+    if (err) return res.json(err);
+    return res.json(data);
+  });
+});
+
+app.get('/testing', (req, res) => res.json('this is testinggggggggggggg'));
+app.get('/test', (req, res) => res.status(200).json({ message: 'Testing successfully....' }));
+
+// =========================================================================
+// NOTIFICATION JOB TRIGGER (legacy path)
+// =========================================================================
+app.post('/trigger-all-user-notifications', async (req, res) => {
   try {
-    const uploadPromises = req.files.map(async file => {
-      const imagePath = file.path;
-      // convert to WebP on upload:
-      const result = await cloudinary.uploader.upload(imagePath, {
-        folder: req.body.folderName || 'default-folder',
-        use_filename: true,
-        unique_filename: false,
-        overwrite: true,
-        transformation: [
-          // first you can cap size if you like:
-          // { width: 2000, crop: 'limit' },
-          // then *actually* convert:
-          { fetch_format: 'webp', quality: 'auto' }
-        ]
-      });
-      fs.unlinkSync(imagePath);
-      return {
-        success: true,
-        url: result.secure_url,  // this is .webp
-        public_id: result.public_id,
-        format: result.format    // should be 'webp'
-      };
-    });
-
-    const images = await Promise.all(uploadPromises);
-    res.json({ success: true, images });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, error: 'Failed to upload image' });
-  }
-});
-
-
-
-
-
-// Manual trigger for the daily ingest pipeline (useful for Dashboard testing)
-app.post('/trigger-daily-ingest', async (req, res) => {
-  const storeIds = Array.isArray(req.body?.storeIds) && req.body.storeIds.length > 0
-    ? req.body.storeIds.map(id => parseInt(id, 10)).filter(Number.isFinite)
-    : [];
-  const label = storeIds.length > 0 ? `stores [${storeIds.join(', ')}]` : 'all active stores';
-  console.log(`[Manual] Daily ingest triggered for ${label}.`);
-  res.status(202).json({ message: `Daily ingest started for ${label}. Check server logs for progress.` });
-
-  // Run the ingestion asynchronously in background
-  (async () => {
-    let jobLogId = null;
-    try {
-      const startResult = await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
-        'manual-daily-ingest',
-        'started',
-        `Manual daily ingest triggered for ${label}.`
-      ]);
-      jobLogId = startResult.insertId;
-
-      const storeSummaries = await runDailyIngest(formatDataToJson, storeIds);
-
-      await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
-        'manual-daily-ingest',
-        'success',
-        `Manual daily ingest completed successfully for ${label}.`
-      ]);
-
-      // Persist per-store summaries
-      if (jobLogId && Array.isArray(storeSummaries)) {
-        for (const s of storeSummaries) {
-          await queryPromise(
-            'INSERT INTO ingest_store_logs (job_log_id, store_id, posts_fetched, images_discovered, images_uploaded, images_with_products, products_inserted, errors) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [
-              jobLogId,
-              s.storeId,
-              s.postsFetched,
-              s.imagesDiscovered,
-              s.imagesUploaded,
-              s.imagesWithProducts,
-              s.productsInserted,
-              s.errors.length > 0 ? JSON.stringify(s.errors) : null,
-            ]
-          );
-        }
-      }
-    } catch (err) {
-      console.error('[Manual] Daily ingest error:', err.message);
+    (async () => {
       try {
         await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
-          'manual-daily-ingest',
-          'failed',
-          `Error for ${label}: ${err.message}`
+          'manual-all-user-notifications',
+          'started',
+          'Manual notification job started for all users.',
         ]);
-      } catch (dbErr) {
-        console.error('[Manual] Failed to log failure to database:', dbErr.message);
+        await sendDailyProductNotifications(true);
+        await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+          'manual-all-user-notifications',
+          'success',
+          'Manual notification job completed for all users.',
+        ]);
+      } catch (err) {
+        logger.error('[Manual] Push notifications error:', err.message);
+        try {
+          await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
+            'manual-all-user-notifications',
+            'failed',
+            err.message,
+          ]);
+        } catch {}
       }
-    }
-  })();
+    })();
+    res.status(202).json({ message: 'Notification process started.' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error starting notification process.' });
+  }
 });
 
-// Automatic daily ingest at noon (12:00) server time
+// =========================================================================
+// CRON JOBS
+// =========================================================================
 cron.schedule('0 12 * * *', async () => {
-  console.log('[Cron] Noon trigger fired — starting daily ingest...');
+  logger.info('[Cron] Noon trigger fired — starting daily ingest...');
   let jobLogId = null;
   try {
     const startResult = await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
       'daily-ingest',
       'started',
-      'Daily noon ingest cron job triggered.'
+      'Daily noon ingest cron job triggered.',
     ]);
     jobLogId = startResult.insertId;
-
-    const storeSummaries = await runDailyIngest(formatDataToJson);
-
+    const storeSummaries = await runDailyIngest(formatDataToJson, [], {
+      extractionMode: process.env.INGEST_GEMINI_MODE || 'online',
+    });
     await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
       'daily-ingest',
       'success',
-      'Daily noon ingest completed successfully.'
+      'Daily noon ingest completed successfully.',
     ]);
-
-    // Persist per-store summaries
     if (jobLogId && Array.isArray(storeSummaries)) {
       for (const s of storeSummaries) {
         await queryPromise(
@@ -3440,88 +971,86 @@ cron.schedule('0 12 * * *', async () => {
             s.imagesWithProducts,
             s.productsInserted,
             s.errors.length > 0 ? JSON.stringify(s.errors) : null,
-          ]
+          ],
         );
       }
     }
   } catch (err) {
-    console.error('[Cron] Daily ingest failed:', err.message);
+    logger.error('[Cron] Daily ingest failed:', err.message);
     try {
       await queryPromise('INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)', [
         'daily-ingest',
         'failed',
-        err.message
+        err.message,
       ]);
-    } catch (dbErr) {
-      console.error('[Cron] Failed to log failure to database:', dbErr.message);
-    }
+    } catch {}
   }
 });
-console.log('[Cron] Daily noon ingest scheduler registered.');
+logger.info('[Cron] Daily noon ingest scheduler registered.');
 
+cron.schedule('*/10 * * * *', async () => {
+  try {
+    const summary = await pollGeminiBatches({ limit: 20 });
+    if (summary.processedBatches > 0 || summary.completedItems > 0 || summary.failedItems > 0) {
+      logger.info(
+        `[Cron] Gemini batch poll: scanned=${summary.scannedBatches}, processed=${summary.processedBatches}, completedItems=${summary.completedItems}, failedItems=${summary.failedItems}`,
+      );
+    }
+  } catch (err) {
+    logger.error('[Cron] Gemini batch poll failed:', err.message);
+  }
+});
+logger.info('[Cron] Gemini batch poll scheduler registered (every 10 minutes).');
 
+// =========================================================================
+// SERVER START
+// =========================================================================
 const port = process.env.PORT || 3000;
 
 async function checkGeminiModel() {
   try {
-    console.log(`[Gemini] Checking model "${model}" via Google AI Studio...`);
-    const result = await generativeModel.generateContent({
-      model: model,
+    const { GoogleGenAI } = await import('@google/genai');
+    const aiStudio = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const result = await aiStudio.models.generateContent({
+      model: 'gemini-2.5-flash-lite',
       contents: ['Reply with the single word: OK'],
     });
-    const reply = result?.text?.trim();
-    console.log(`✅ [Gemini] Model check passed. Response: "${reply}"`);
+    logger.info(`Model check passed: "${result?.text?.trim()}"`);
   } catch (err) {
-    const summary = err.message?.split('\n')[0] ?? err.toString();
-    console.error(`❌ [Gemini] Model check FAILED: ${summary}`);
+    logger.error(`Model check FAILED: ${err.message?.split('\n')[0] ?? err}`);
   }
 }
 
 async function initializeDatabaseTables() {
-  const jobLogsQuery = `
-    CREATE TABLE IF NOT EXISTS \`job_logs\` (
-      \`id\` INT NOT NULL AUTO_INCREMENT,
-      \`job_name\` VARCHAR(100) NOT NULL,
-      \`status\` VARCHAR(50) NOT NULL,
-      \`message\` TEXT DEFAULT NULL,
-      \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (\`id\`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-  `;
-  const ingestStoreLogsQuery = `
-    CREATE TABLE IF NOT EXISTS \`ingest_store_logs\` (
-      \`id\` INT NOT NULL AUTO_INCREMENT,
-      \`job_log_id\` INT NOT NULL,
-      \`store_id\` INT NOT NULL,
-      \`posts_fetched\` INT DEFAULT 0,
-      \`images_discovered\` INT DEFAULT 0,
-      \`images_uploaded\` INT DEFAULT 0,
-      \`images_with_products\` INT DEFAULT 0,
-      \`products_inserted\` INT DEFAULT 0,
-      \`errors\` TEXT DEFAULT NULL,
-      \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (\`id\`),
-      CONSTRAINT \`fk_ingest_store_logs_job_logs\` FOREIGN KEY (\`job_log_id\`) REFERENCES \`job_logs\` (\`id\`) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-  `;
   try {
-    await queryPromise(jobLogsQuery);
-    console.log('✅ [Database] job_logs table initialized successfully (or already exists).');
-    await queryPromise(ingestStoreLogsQuery);
-    console.log('✅ [Database] ingest_store_logs table initialized successfully (or already exists).');
+    await queryPromise(
+      'CREATE TABLE IF NOT EXISTS `job_logs` (`id` INT NOT NULL AUTO_INCREMENT, `job_name` VARCHAR(100) NOT NULL, `status` VARCHAR(50) NOT NULL, `message` TEXT DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    );
+    logger.info('job_logs table initialized.');
+    await queryPromise(
+      'CREATE TABLE IF NOT EXISTS `ingest_store_logs` (`id` INT NOT NULL AUTO_INCREMENT, `job_log_id` INT NOT NULL, `store_id` INT NOT NULL, `posts_fetched` INT DEFAULT 0, `images_discovered` INT DEFAULT 0, `images_uploaded` INT DEFAULT 0, `images_with_products` INT DEFAULT 0, `products_inserted` INT DEFAULT 0, `errors` TEXT DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`id`), CONSTRAINT `fk_ingest_store_logs_job_logs` FOREIGN KEY (`job_log_id`) REFERENCES `job_logs` (`id`) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    );
+    logger.info('ingest_store_logs table initialized.');
+    await queryPromise(
+      'CREATE TABLE IF NOT EXISTS `ingest_gemini_batches` (`id` INT NOT NULL AUTO_INCREMENT, `store_id` INT NOT NULL, `provider_batch_name` VARCHAR(255) NOT NULL, `model_name` VARCHAR(100) NOT NULL, `status` VARCHAR(30) NOT NULL DEFAULT "pending", `run_label` VARCHAR(100) DEFAULT NULL, `total_items` INT NOT NULL DEFAULT 0, `completed_items` INT NOT NULL DEFAULT 0, `failed_items` INT NOT NULL DEFAULT 0, `error_message` TEXT DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`id`), UNIQUE KEY `uniq_provider_batch_name` (`provider_batch_name`), KEY `idx_batch_status` (`status`), KEY `idx_batch_store` (`store_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    );
+    logger.info('ingest_gemini_batches table initialized.');
+    await queryPromise(
+      'CREATE TABLE IF NOT EXISTS `ingest_gemini_batch_items` (`id` INT NOT NULL AUTO_INCREMENT, `batch_id` INT NOT NULL, `item_index` INT NOT NULL, `store_id` INT NOT NULL, `image_id` BIGINT DEFAULT NULL, `uploaded_url` TEXT DEFAULT NULL, `post_id` BIGINT DEFAULT NULL, `timestamp_unix` BIGINT DEFAULT NULL, `post_text` TEXT DEFAULT NULL, `flyer_book_id` VARCHAR(64) DEFAULT NULL, `user_id` INT DEFAULT NULL, `status` VARCHAR(30) NOT NULL DEFAULT "queued", `products_inserted` INT NOT NULL DEFAULT 0, `raw_response` MEDIUMTEXT DEFAULT NULL, `error_message` TEXT DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`id`), KEY `idx_batch_items_batch_id` (`batch_id`), KEY `idx_batch_items_status` (`status`), CONSTRAINT `fk_ingest_gemini_batch_items_batch` FOREIGN KEY (`batch_id`) REFERENCES `ingest_gemini_batches` (`id`) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    );
+    logger.info('ingest_gemini_batch_items table initialized.');
   } catch (err) {
-    console.error('❌ [Database] Failed to initialize database tables:', err.message);
+    logger.error('Failed to initialize tables:', err.message);
   }
 }
 
 app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-  // console log the ip address of the machine
+  logger.info(`Server is running on port ${port}`);
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name]) {
       if (iface.family === 'IPv4' && !iface.internal) {
-        console.log(`Server IP address: http://${iface.address}:${port}`);
+        logger.info(`Server IP: http://${iface.address}:${port}`);
       }
     }
   }

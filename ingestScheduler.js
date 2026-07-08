@@ -1,6 +1,8 @@
 import { queryPromise } from './dbUtils.js';
 import { fetchFacebookPosts } from './rapidApi.js';
 import { uploadMultipleFacebookPhotosToCloudinary } from './uploadFacebookPhoto.js';
+import logger from './services/logger.js';
+import { enqueueGeminiBatchForStore, isGeminiBatchModeEnabled } from './services/geminiBatchIngestService.js';
 
 function flattenFacebookPostsToItems(posts) {
   const items = [];
@@ -31,9 +33,11 @@ function flattenFacebookPostsToItems(posts) {
  * @param {Function} formatDataToJson - The extraction + DB insert function from server.js
  * @param {number[]} [storeIds=[]] - Optional list of storeIds to limit processing. Empty = all active stores.
  */
-export async function runDailyIngest(formatDataToJson, storeIds = []) {
+export async function runDailyIngest(formatDataToJson, storeIds = [], options = {}) {
+  const extractionMode = String(options?.extractionMode || process.env.INGEST_GEMINI_MODE || 'online').toLowerCase();
+  const useBatchMode = isGeminiBatchModeEnabled(extractionMode);
   const filterLabel = storeIds.length > 0 ? `stores [${storeIds.join(', ')}]` : 'all active stores';
-  console.log(`[Ingest] Starting daily ingest job for ${filterLabel}...`);
+  logger.info(`[Ingest] Starting daily ingest job for ${filterLabel} (mode=${useBatchMode ? 'batch' : 'online'})...`);
   const storeSummaries = [];
 
   let stores;
@@ -41,19 +45,19 @@ export async function runDailyIngest(formatDataToJson, storeIds = []) {
     if (storeIds.length > 0) {
       stores = await queryPromise(
         `SELECT storeId, facebookPageId FROM stores WHERE active = true AND facebookPageId IS NOT NULL AND storeId IN (${storeIds.map(() => '?').join(',')})`,
-        storeIds
+        storeIds,
       );
     } else {
       stores = await queryPromise(
-        'SELECT storeId, facebookPageId FROM stores WHERE active = true AND facebookPageId IS NOT NULL'
+        'SELECT storeId, facebookPageId FROM stores WHERE active = true AND facebookPageId IS NOT NULL',
       );
     }
   } catch (err) {
-    console.error('[Ingest] Failed to fetch active stores:', err.message);
+    logger.error('[Ingest] Failed to fetch active stores:', err.message);
     return;
   }
 
-  console.log(`[Ingest] Found ${stores.length} stores to process (${filterLabel}).`);
+  logger.info(`[Ingest] Found ${stores.length} stores to process (${filterLabel}).`);
 
   for (const store of stores) {
     const { storeId, facebookPageId } = store;
@@ -69,27 +73,27 @@ export async function runDailyIngest(formatDataToJson, storeIds = []) {
     };
 
     try {
-      console.log(`[Ingest] Processing store ${storeId} (page: ${facebookPageId})`);
+      logger.info(`[Ingest] Processing store ${storeId} (page: ${facebookPageId})`);
 
       // 1. Fetch posts from Facebook via RapidAPI
       const posts = await fetchFacebookPosts(facebookPageId);
-      const items = flattenFacebookPostsToItems(posts).filter(item => Boolean(item.uri));
+      const items = flattenFacebookPostsToItems(posts).filter((item) => Boolean(item.uri));
       summary.postsFetched = posts.length;
       summary.imagesDiscovered = items.length;
 
       if (items.length === 0) {
-        console.log(`[Ingest] No images found for store ${storeId}. Skipping.`);
+        logger.info(`[Ingest] No images found for store ${storeId}. Skipping.`);
         storeSummaries.push(summary);
         continue;
       }
 
       // 2. Upload images to Cloudinary
-      const imageUrlsToUpload = items.map(item => ({ imageUrl: item.uri, imageId: item.imageId }));
+      const imageUrlsToUpload = items.map((item) => ({ imageUrl: item.uri, imageId: item.imageId }));
       const uploadResults = await uploadMultipleFacebookPhotosToCloudinary(imageUrlsToUpload);
       summary.imagesUploaded = uploadResults.length;
 
       if (uploadResults.length === 0) {
-        console.log(`[Ingest] No uploads succeeded for store ${storeId}. Skipping extraction.`);
+        logger.info(`[Ingest] No uploads succeeded for store ${storeId}. Skipping extraction.`);
         summary.errors.push({
           storeId,
           imageId: null,
@@ -100,6 +104,38 @@ export async function runDailyIngest(formatDataToJson, storeIds = []) {
         continue;
       }
 
+      if (useBatchMode) {
+        try {
+          const batchResult = await enqueueGeminiBatchForStore({
+            storeId,
+            uploadResults,
+            sourceItems: items,
+            userId: 1,
+            flyerBookId: `${storeId}-${Date.now()}`,
+            runLabel: 'daily-ingest-batch',
+          });
+
+          summary.errors.push(...(batchResult.errors || []));
+          summary.productsInserted = 0;
+          summary.imagesWithProducts = 0;
+          logger.info(
+            `[Ingest] Store ${storeId}: queued ${batchResult.itemCount} image requests in ${batchResult.batchCount} batch job(s).`,
+          );
+          storeSummaries.push(summary);
+          continue;
+        } catch (batchErr) {
+          logger.error(
+            `[Ingest] Batch enqueue failed for store ${storeId}, falling back to online extraction: ${batchErr.message}`,
+          );
+          summary.errors.push({
+            storeId,
+            imageId: null,
+            type: 'batch-enqueue',
+            message: `Batch enqueue failed, fallback to online mode: ${batchErr.message}`,
+          });
+        }
+      }
+
       // 3. Run Gemini extraction + DB insert (dryRun: false = real insert)
       const diagnostics = { imageResults: [], errors: [] };
       const products = await formatDataToJson(
@@ -107,24 +143,24 @@ export async function runDailyIngest(formatDataToJson, storeIds = []) {
         storeId,
         1,
         `${storeId}-${Date.now()}`,
-        items.map(item => item.message || ''),
+        items.map((item) => item.message || ''),
         items[0].postId || null,
         items[0].imageId || null,
         items[0].timestamp || Math.floor(Date.now() / 1000),
-        { dryRun: false, runLabel: 'daily-ingest', diagnostics }
+        { dryRun: false, runLabel: 'daily-ingest', diagnostics },
       );
 
       summary.productsInserted = products.length;
-      summary.imagesWithProducts = diagnostics.imageResults
-        .filter(result => Number(result.validProductsCount) > 0)
-        .length;
+      summary.imagesWithProducts = diagnostics.imageResults.filter(
+        (result) => Number(result.validProductsCount) > 0,
+      ).length;
       summary.errors.push(...diagnostics.errors);
 
-      console.log(`[Ingest] Store ${storeId}: ${products.length} products inserted.`);
+      logger.info(`[Ingest] Store ${storeId}: ${products.length} products inserted.`);
       storeSummaries.push(summary);
     } catch (err) {
       // One store failing does not stop the others
-      console.error(`[Ingest] Error processing store ${storeId}:`, err.message);
+      logger.error(`[Ingest] Error processing store ${storeId}:`, err.message);
       summary.errors.push({
         storeId,
         imageId: null,
@@ -135,20 +171,20 @@ export async function runDailyIngest(formatDataToJson, storeIds = []) {
     }
   }
 
-  console.log('[Ingest] Summary by store:');
+  logger.info('[Ingest] Summary by store:');
   storeSummaries.forEach((summary) => {
-    console.log(
-      `[Ingest][Store ${summary.storeId}] posts=${summary.postsFetched}, images=${summary.imagesDiscovered}, uploaded=${summary.imagesUploaded}, imagesWithProducts=${summary.imagesWithProducts}/${summary.imagesUploaded}, productsInserted=${summary.productsInserted}`
+    logger.info(
+      `[Ingest][Store ${summary.storeId}] posts=${summary.postsFetched}, images=${summary.imagesDiscovered}, uploaded=${summary.imagesUploaded}, imagesWithProducts=${summary.imagesWithProducts}/${summary.imagesUploaded}, productsInserted=${summary.productsInserted}`,
     );
     if (summary.errors.length > 0) {
       summary.errors.forEach((error, idx) => {
-        console.log(
-          `[Ingest][Store ${summary.storeId}][Error ${idx + 1}] imageId=${error.imageId ?? 'n/a'} type=${error.type} message=${error.message}`
+        logger.info(
+          `[Ingest][Store ${summary.storeId}][Error ${idx + 1}] imageId=${error.imageId ?? 'n/a'} type=${error.type} message=${error.message}`,
         );
       });
     }
   });
 
-  console.log('[Ingest] Daily ingest job complete.');
+  logger.info('[Ingest] Daily ingest job complete.');
   return storeSummaries;
 }

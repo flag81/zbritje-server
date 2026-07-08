@@ -1,0 +1,7 @@
+node_modules
+persistent
+keys
+*.json
+package-lock.json
+sw.js
+*.log

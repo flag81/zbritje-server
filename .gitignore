@@ -13,6 +13,7 @@ dist-ssr
 *.local
 *.jpg
 .env
+*.log
 
 # ignore persistent folder and everything in it
 persistent/

@@ -1,5 +1,6 @@
 import { Expo } from 'expo-server-sdk';
 import { queryPromise } from './dbUtils.js';
+import logger from './services/logger.js';
 
 /**
  * Finds users and on-sale products that match their favorite keywords,
@@ -36,7 +37,7 @@ export async function sendDailyProductNotifications(forceAll = false) {
   const dayOfWeek = today.getDay();
   const dayOfMonth = today.getDate();
 
-  console.log(`[Push] Starting notification job. Forced: ${forceAll}`);
+  logger.info(`[Push] Starting notification job. Forced: ${forceAll}`);
 
   let allMatches = [];
   if (forceAll) {
@@ -46,13 +47,13 @@ export async function sendDailyProductNotifications(forceAll = false) {
     allMatches = [...dailyMatches, ...weeklyMatches, ...monthlyMatches];
   } else {
     const dailyMatches = await getMatchingUsersAndProducts('daily');
-    const weeklyMatches = (dayOfWeek === 0) ? await getMatchingUsersAndProducts('weekly') : [];
-    const monthlyMatches = (dayOfMonth === 1) ? await getMatchingUsersAndProducts('monthly') : [];
+    const weeklyMatches = dayOfWeek === 0 ? await getMatchingUsersAndProducts('weekly') : [];
+    const monthlyMatches = dayOfMonth === 1 ? await getMatchingUsersAndProducts('monthly') : [];
     allMatches = [...dailyMatches, ...weeklyMatches, ...monthlyMatches];
   }
 
   if (allMatches.length === 0) {
-    console.log('[Push] No new products matching user preferences today.');
+    logger.info('[Push] No new products matching user preferences today.');
     return;
   }
 
@@ -67,9 +68,9 @@ export async function sendDailyProductNotifications(forceAll = false) {
     return acc;
   }, {});
 
-  const userIds = Object.keys(userNotifications).map(id => parseInt(id, 10));
+  const userIds = Object.keys(userNotifications).map((id) => parseInt(id, 10));
   if (userIds.length === 0) {
-    console.log('[Push] No users with matching products have push tokens.');
+    logger.info('[Push] No users with matching products have push tokens.');
     return;
   }
 
@@ -114,13 +115,13 @@ export async function sendDailyProductNotifications(forceAll = false) {
       });
     }
 
-    productIds.forEach(productId => {
+    productIds.forEach((productId) => {
       notifiedPairs.push([userId, productId]);
     });
   }
 
   if (Object.keys(messagesByProject).length === 0) {
-    console.log('[Push] No valid push tokens found for users with notifications.');
+    logger.info('[Push] No valid push tokens found for users with notifications.');
     return;
   }
 
@@ -128,13 +129,13 @@ export async function sendDailyProductNotifications(forceAll = false) {
   for (const projectId in messagesByProject) {
     const projectMessages = messagesByProject[projectId];
     if (projectMessages.length > 0) {
-      console.log(`[Push] Sending ${projectMessages.length} notifications for project ${projectId}...`);
+      logger.info(`[Push] Sending ${projectMessages.length} notifications for project ${projectId}...`);
       const chunks = expo.chunkPushNotifications(projectMessages);
       for (let chunk of chunks) {
         try {
           await expo.sendPushNotificationsAsync(chunk);
         } catch (error) {
-          console.error(`[Push] Error sending notification chunk for project ${projectId}:`, error);
+          logger.error(`[Push] Error sending notification chunk for project ${projectId}:`, error);
         }
       }
     }
@@ -144,10 +145,10 @@ export async function sendDailyProductNotifications(forceAll = false) {
     try {
       const q = 'INSERT INTO sent_notifications (userId, productId) VALUES ?';
       await queryPromise(q, [notifiedPairs]);
-      console.log(`[Push] Logged ${notifiedPairs.length} sent notifications.`);
+      logger.info(`[Push] Logged ${notifiedPairs.length} sent notifications.`);
     } catch (error) {
-      console.error('[Push] Error logging sent notifications:', error);
+      logger.error('[Push] Error logging sent notifications:', error);
     }
   }
-  console.log('[Push] Finished sending notifications.');
+  logger.info('[Push] Finished sending notifications.');
 }

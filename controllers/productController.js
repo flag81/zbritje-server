@@ -1,4 +1,5 @@
 import { queryPromise } from '../dbUtils.js'; // Assuming dbUtils.js exports queryPromise
+import logger from '../services/logger.js';
 
 /**
  * GET /products - For the mobile app
@@ -19,7 +20,12 @@ export const getProducts = async (req, res) => {
     storeId = null;
   }
 
-  const searchKeywordsArray = keywordQuery ? keywordQuery.split(' ').map(kw => kw.trim()).filter(kw => kw.length > 1) : [];
+  const searchKeywordsArray = keywordQuery
+    ? keywordQuery
+        .split(' ')
+        .map((kw) => kw.trim())
+        .filter((kw) => kw.length > 1)
+    : [];
   let matchedKeywordCountSelectSQL = '0 AS matched_keyword_count';
   if (searchKeywordsArray.length > 0) {
     const keywordCases = searchKeywordsArray.map(() => `WHEN ? THEN 1`).join(' ');
@@ -96,8 +102,8 @@ export const getProducts = async (req, res) => {
     const nextPage = data.length === limit ? page + 1 : null;
     res.json({ data, nextPage });
   } catch (err) {
-    console.error("getProducts error:", err);
-    res.status(500).json({ error: "Failed to retrieve products" });
+    logger.error('getProducts error:', err);
+    res.status(500).json({ error: 'Failed to retrieve products' });
   }
 };
 
@@ -158,8 +164,8 @@ export const getProductsDashboard = async (req, res) => {
     const nextPage = data.length === limit ? page + 1 : null;
     res.json({ data, nextPage });
   } catch (err) {
-    console.error("getProductsDashboard error:", err);
-    res.status(500).json({ error: "Failed to retrieve products for dashboard" });
+    logger.error('getProductsDashboard error:', err);
+    res.status(500).json({ error: 'Failed to retrieve products for dashboard' });
   }
 };
 
@@ -179,7 +185,7 @@ export const deleteProduct = async (req, res) => {
     res.status(200).json({ message: 'Product and related data deleted successfully.' });
   } catch (error) {
     await queryPromise('ROLLBACK');
-    console.error('Error deleting product:', error);
+    logger.error('Error deleting product:', error);
     res.status(500).json({ message: 'An error occurred while deleting the product.' });
   }
 };
@@ -196,7 +202,7 @@ export const updateProductPrices = async (req, res) => {
     await queryPromise(q, [oldPrice, newPrice, productId]);
     res.status(200).json({ message: 'Product prices updated successfully.' });
   } catch (error) {
-    console.error('Error updating product prices:', error);
+    logger.error('Error updating product prices:', error);
     res.status(500).json({ error: 'Failed to update product prices.' });
   }
 };
@@ -213,7 +219,7 @@ export const editProductDescription = async (req, res) => {
     await queryPromise(q, [description, productId]);
     res.status(200).json({ message: 'Product description updated successfully.' });
   } catch (error) {
-    console.error('Error updating product description:', error);
+    logger.error('Error updating product description:', error);
     res.status(500).json({ error: 'Failed to update product description.' });
   }
 };
@@ -223,35 +229,38 @@ export const editProductDescription = async (req, res) => {
  * Adds a keyword to a product.
  */
 export const addKeyword = async (req, res) => {
-    const { productId } = req.params;
-    const { keyword } = req.body;
+  const { productId } = req.params;
+  const { keyword } = req.body;
 
-    if (!keyword || keyword.trim() === '') {
-        return res.status(400).json({ error: 'Keyword cannot be empty.' });
+  if (!keyword || keyword.trim() === '') {
+    return res.status(400).json({ error: 'Keyword cannot be empty.' });
+  }
+
+  try {
+    await queryPromise('START TRANSACTION');
+
+    let keywordResults = await queryPromise('SELECT keywordId FROM keywords WHERE keyword = ?', [keyword]);
+    let keywordId;
+
+    if (keywordResults.length > 0) {
+      keywordId = keywordResults[0].keywordId;
+    } else {
+      const insertResult = await queryPromise('INSERT INTO keywords (keyword) VALUES (?)', [keyword]);
+      keywordId = insertResult.insertId;
     }
 
-    try {
-        await queryPromise('START TRANSACTION');
-        
-        let keywordResults = await queryPromise('SELECT keywordId FROM keywords WHERE keyword = ?', [keyword]);
-        let keywordId;
+    await queryPromise('INSERT IGNORE INTO productkeywords (productId, keywordId) VALUES (?, ?)', [
+      productId,
+      keywordId,
+    ]);
 
-        if (keywordResults.length > 0) {
-            keywordId = keywordResults[0].keywordId;
-        } else {
-            const insertResult = await queryPromise('INSERT INTO keywords (keyword) VALUES (?)', [keyword]);
-            keywordId = insertResult.insertId;
-        }
-
-        await queryPromise('INSERT IGNORE INTO productkeywords (productId, keywordId) VALUES (?, ?)', [productId, keywordId]);
-        
-        await queryPromise('COMMIT');
-        res.status(201).json({ message: 'Keyword added successfully.' });
-    } catch (error) {
-        await queryPromise('ROLLBACK');
-        console.error('Error adding keyword:', error);
-        res.status(500).json({ error: 'Failed to add keyword.' });
-    }
+    await queryPromise('COMMIT');
+    res.status(201).json({ message: 'Keyword added successfully.' });
+  } catch (error) {
+    await queryPromise('ROLLBACK');
+    logger.error('Error adding keyword:', error);
+    res.status(500).json({ error: 'Failed to add keyword.' });
+  }
 };
 
 /**
@@ -259,29 +268,29 @@ export const addKeyword = async (req, res) => {
  * Removes a keyword from a product.
  */
 export const removeKeyword = async (req, res) => {
-    const { productId } = req.params;
-    const { keyword } = req.body;
+  const { productId } = req.params;
+  const { keyword } = req.body;
 
-    if (!keyword) {
-        return res.status(400).json({ error: 'Keyword is required.' });
-    }
+  if (!keyword) {
+    return res.status(400).json({ error: 'Keyword is required.' });
+  }
 
-    try {
-        const q = `
+  try {
+    const q = `
             DELETE pk FROM productkeywords pk
             JOIN keywords k ON pk.keywordId = k.keywordId
             WHERE pk.productId = ? AND k.keyword = ?
         `;
-        const result = await queryPromise(q, [productId, keyword]);
-        if (result.affectedRows > 0) {
-            res.status(200).json({ message: 'Keyword removed successfully.' });
-        } else {
-            res.status(404).json({ message: 'Keyword not found for this product.' });
-        }
-    } catch (error) {
-        console.error('Error removing keyword:', error);
-        res.status(500).json({ error: 'Failed to remove keyword.' });
+    const result = await queryPromise(q, [productId, keyword]);
+    if (result.affectedRows > 0) {
+      res.status(200).json({ message: 'Keyword removed successfully.' });
+    } else {
+      res.status(404).json({ message: 'Keyword not found for this product.' });
     }
+  } catch (error) {
+    logger.error('Error removing keyword:', error);
+    res.status(500).json({ error: 'Failed to remove keyword.' });
+  }
 };
 
 /**
@@ -289,19 +298,19 @@ export const removeKeyword = async (req, res) => {
  * Adds a product to the user's favorites.
  */
 export const addFavorite = async (req, res) => {
-    const { productId } = req.params;
-    const userId = req.identifiedUser.id; // From middleware
+  const { productId } = req.params;
+  const userId = req.identifiedUser.id; // From middleware
 
-    try {
-        await queryPromise('INSERT INTO favorites (userId, productId) VALUES (?, ?)', [userId, productId]);
-        res.status(201).json({ message: 'Product added to favorites.' });
-    } catch (error) {
-        if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(200).json({ message: 'Product is already in favorites.' });
-        }
-        console.error('Error adding favorite:', error);
-        res.status(500).json({ error: 'Failed to add favorite.' });
+  try {
+    await queryPromise('INSERT INTO favorites (userId, productId) VALUES (?, ?)', [userId, productId]);
+    res.status(201).json({ message: 'Product added to favorites.' });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(200).json({ message: 'Product is already in favorites.' });
     }
+    logger.error('Error adding favorite:', error);
+    res.status(500).json({ error: 'Failed to add favorite.' });
+  }
 };
 
 /**
@@ -309,16 +318,16 @@ export const addFavorite = async (req, res) => {
  * Removes a product from the user's favorites.
  */
 export const removeFavorite = async (req, res) => {
-    const { productId } = req.params;
-    const userId = req.identifiedUser.id; // From middleware
+  const { productId } = req.params;
+  const userId = req.identifiedUser.id; // From middleware
 
-    try {
-        await queryPromise('DELETE FROM favorites WHERE userId = ? AND productId = ?', [userId, productId]);
-        res.status(200).json({ message: 'Product removed from favorites.' });
-    } catch (error) {
-        console.error('Error removing favorite:', error);
-        res.status(500).json({ error: 'Failed to remove favorite.' });
-    }
+  try {
+    await queryPromise('DELETE FROM favorites WHERE userId = ? AND productId = ?', [userId, productId]);
+    res.status(200).json({ message: 'Product removed from favorites.' });
+  } catch (error) {
+    logger.error('Error removing favorite:', error);
+    res.status(500).json({ error: 'Failed to remove favorite.' });
+  }
 };
 
 /**
@@ -332,7 +341,21 @@ export const insertProducts = async (products) => {
     let insertedCount = 0;
 
     for (const product of products) {
-      const { product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, keywords, image_url, category_id, flyer_book_id, postId, imageId, timestamp } = product;
+      const {
+        product_description,
+        old_price,
+        new_price,
+        discount_percentage,
+        sale_end_date,
+        storeId,
+        keywords,
+        image_url,
+        category_id,
+        flyer_book_id,
+        postId,
+        imageId,
+        timestamp,
+      } = product;
 
       // Data validation and sanitization
       const oldPriceNumber = parseFloat(old_price) || 0;
@@ -342,9 +365,22 @@ export const insertProducts = async (products) => {
       const [productResult] = await connection.query(
         `INSERT INTO products (product_description, old_price, new_price, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId, timestamp)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [product_description, oldPriceNumber, newPriceNumber, discount_percentage, sale_end_date, storeId, image_url, category_id, flyer_book_id, postId, imageId, formattedTimestamp]
+        [
+          product_description,
+          oldPriceNumber,
+          newPriceNumber,
+          discount_percentage,
+          sale_end_date,
+          storeId,
+          image_url,
+          category_id,
+          flyer_book_id,
+          postId,
+          imageId,
+          formattedTimestamp,
+        ],
       );
-      
+
       const productId = productResult.insertId;
       insertedCount++;
 
@@ -358,16 +394,19 @@ export const insertProducts = async (products) => {
             const [newKeyword] = await connection.query('INSERT INTO keywords (keyword) VALUES (?)', [keyword]);
             keywordId = newKeyword.insertId;
           }
-          await connection.query('INSERT IGNORE INTO productkeywords (productId, keywordId) VALUES (?, ?)', [productId, keywordId]);
+          await connection.query('INSERT IGNORE INTO productkeywords (productId, keywordId) VALUES (?, ?)', [
+            productId,
+            keywordId,
+          ]);
         }
       }
     }
 
     await connection.commit();
-    return { insertedCount, message: "Batch insert successful." };
+    return { insertedCount, message: 'Batch insert successful.' };
   } catch (error) {
     await connection.rollback();
-    console.error('[ProductController] Batch insert failed:', error);
+    logger.error('[ProductController] Batch insert failed:', error);
     throw error; // Re-throw to be caught by the calling controller
   } finally {
     connection.release();
