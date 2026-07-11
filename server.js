@@ -492,13 +492,24 @@ app.get('/getProducts', async (req, res) => {
 
   if (conditions.length > 0) q += ' WHERE ' + conditions.join(' AND ');
 
+  let countQ = `SELECT COUNT(DISTINCT p.productId) AS totalItems ${fromAndJoins}`;
+  const countParams = [];
+  if (numericUserId) countParams.push(numericUserId);
+  const countConditions = [...conditions, 'p.sale_end_date >= ?'];
+  const countWhereParams = [...whereParams, today];
+  if (countConditions.length > 0) {
+    countQ += ' WHERE ' + countConditions.join(' AND ');
+    countParams.push(...countWhereParams);
+  }
+
   q += ` GROUP BY p.productId ORDER BY matched_keyword_count DESC, productOnSale DESC, categoryWeight DESC, p.productId DESC LIMIT ? OFFSET ?`;
   const finalParams = [...selectParams, ...whereParams, limit, offset];
 
   try {
-    const data = await queryPromise(q, finalParams);
+    const [data, totalResult] = await Promise.all([queryPromise(q, finalParams), queryPromise(countQ, countParams)]);
     const nextPage = data.length === limit ? page + 1 : null;
-    return res.json({ data, nextPage });
+    const totalItems = Number(totalResult?.[0]?.totalItems || 0);
+    return res.json({ data, nextPage, totalItems });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to retrieve products' });
   }
