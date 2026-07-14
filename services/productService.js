@@ -67,9 +67,18 @@ export async function insertProducts1(jsonData) {
   if (!Array.isArray(products)) return;
   if (products.length === 0) return;
 
+  const normalizedProducts = products
+    .map((product) => normalizeProductForInsert(product))
+    .filter(Boolean);
+
+  if (normalizedProducts.length === 0) {
+    allMessages.push('No valid offer products to insert (skipped invalid/non-priced entries).');
+    return;
+  }
+
   try {
     await dbQuery('START TRANSACTION');
-    for (const product of products) {
+    for (const product of normalizedProducts) {
       const {
         product_description,
         old_price,
@@ -86,20 +95,8 @@ export async function insertProducts1(jsonData) {
         timestamp,
       } = product;
 
-      const oldPriceNumber = old_price
-        ? parseFloat(
-            String(old_price)
-              .replace(',', '.')
-              .replace(/[^0-9.-]/g, ''),
-          )
-        : 0;
-      const newPriceNumber = new_price
-        ? parseFloat(
-            String(new_price)
-              .replace(',', '.')
-              .replace(/[^0-9.-]/g, ''),
-          )
-        : 0;
+      const oldPriceNumber = old_price || 0;
+      const newPriceNumber = new_price || 0;
       const numericImageId = parseInt(imageId, 10);
       if (isNaN(numericImageId)) throw new Error(`Invalid numeric value for imageId: ${imageId}`);
 
@@ -159,4 +156,42 @@ export async function insertProducts1(jsonData) {
     allMessages.push(`Error during product insertion: ${err.message}`);
     throw err;
   }
+}
+
+function normalizeProductForInsert(product) {
+  if (!product || typeof product !== 'object') return null;
+
+  const productDescription = String(product.product_description || '').trim();
+  if (productDescription.length < 3) return null;
+
+  const newPriceNumber = parsePriceNumber(product.new_price);
+  if (!Number.isFinite(newPriceNumber) || newPriceNumber <= 0 || newPriceNumber > 10000) {
+    return null;
+  }
+
+  const oldPriceNumber = parsePriceNumber(product.old_price);
+  const saleEndDate = String(product.sale_end_date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(saleEndDate)) return null;
+
+  return {
+    ...product,
+    product_description: productDescription,
+    old_price: Number.isFinite(oldPriceNumber) && oldPriceNumber > 0 ? oldPriceNumber : 0,
+    new_price: newPriceNumber,
+    sale_end_date: saleEndDate,
+  };
+}
+
+function parsePriceNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  if (value === null || value === undefined) return NaN;
+
+  const normalized = String(value)
+    .trim()
+    .replace(',', '.')
+    .replace(/[^0-9.\-]/g, '');
+  if (!normalized) return NaN;
+
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : NaN;
 }

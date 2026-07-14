@@ -625,9 +625,308 @@ app.put('/editStore', (req, res) => {
   });
 });
 
+async function probeAndLogBrokenImage({
+  productId,
+  imageUrl,
+  sourcePage,
+  logPrefix,
+  extraDetails = {},
+}) {
+  const normalizedUrl = String(imageUrl || '').trim();
+  if (!normalizedUrl) return { status: 'skipped' };
+
+  const shouldInsertForUrl = async (url) => {
+    const existing = await queryPromise(
+      `SELECT id
+         FROM broken_image_logs
+        WHERE failing_url = ?
+        LIMIT 1`,
+      [url],
+    );
+    return (existing?.length || 0) === 0;
+  };
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const probeResponse = await fetch(normalizedUrl, {
+      method: 'GET',
+      signal: controller.signal,
+    }).catch((probeErr) => {
+      clearTimeout(timeout);
+      throw probeErr;
+    });
+    clearTimeout(timeout);
+
+    if (!probeResponse.ok) {
+      logger.info(
+        `${logPrefix} status=${probeResponse.status} url=${normalizedUrl} productId=${productId || 'n/a'}`,
+      );
+      const shouldInsert = await shouldInsertForUrl(normalizedUrl);
+      if (shouldInsert) {
+        await queryPromise(
+          `INSERT INTO broken_image_logs
+            (product_id, raw_product_image_url, attempted_cloudinary_url, failing_url, client_error, source_page, extra_details)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            productId || null,
+            normalizedUrl,
+            normalizedUrl,
+            normalizedUrl,
+            `probe-status-${probeResponse.status}`,
+            sourcePage,
+            JSON.stringify({ reportedAt: new Date().toISOString(), probeStatus: probeResponse.status, ...extraDetails }),
+          ],
+        );
+      } else {
+        logger.info(`${logPrefix} duplicate-url-skipped url=${normalizedUrl}`);
+      }
+      return { status: 'broken', probeStatus: probeResponse.status };
+    }
+
+    logger.info(`${logPrefix} ok url=${normalizedUrl} productId=${productId || 'n/a'}`);
+    return { status: 'ok' };
+  } catch (probeError) {
+    logger.info(
+      `${logPrefix} failed url=${normalizedUrl} error=${probeError.message} productId=${productId || 'n/a'}`,
+    );
+    try {
+      const shouldInsert = await shouldInsertForUrl(normalizedUrl);
+      if (shouldInsert) {
+        await queryPromise(
+          `INSERT INTO broken_image_logs
+            (product_id, raw_product_image_url, attempted_cloudinary_url, failing_url, client_error, source_page, extra_details)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            productId || null,
+            normalizedUrl,
+            normalizedUrl,
+            normalizedUrl,
+            probeError.message || 'probe-failed',
+            sourcePage,
+            JSON.stringify({ reportedAt: new Date().toISOString(), ...extraDetails }),
+          ],
+        );
+      } else {
+        logger.info(`${logPrefix} duplicate-url-skipped url=${normalizedUrl}`);
+      }
+    } catch (insertErr) {
+      logger.error('Failed to write broken image probe log:', insertErr.message);
+    }
+    return { status: 'failed', error: probeError.message };
+  }
+}
+
+app.put('/editProductImageUrl', (req, res) => {
+  const { productId, imageUrl } = req.body;
+  if (!productId) return res.status(400).json({ error: 'productId is required' });
+  db.query('UPDATE products SET image_url = ? WHERE productId = ?', [imageUrl || null, productId], (err) => {
+    if (err) return res.status(500).json({ error: 'Failed to update image URL' });
+
+    const normalizedImageUrl = imageUrl || null;
+    res.status(200).json({ message: 'Image URL updated successfully' });
+
+    if (!normalizedImageUrl) return;
+
+    void probeAndLogBrokenImage({
+      productId,
+      imageUrl: normalizedImageUrl,
+      sourcePage: 'dashboard-edit-product-url',
+      logPrefix: '[BrokenImage][EDIT-PROBE]',
+    });
+  });
+});
+
+app.post('/report-broken-product-image', async (req, res) => {
+  const {
+    productId,
+    storeId,
+    storeName,
+    rawProductImageUrl,
+    attemptedCloudinaryUrl,
+    failingUrl,
+    facebookPostId,
+    facebookImageId,
+    facebookTimestamp,
+    clientError,
+    sourcePage,
+    userAgent,
+  } = req.body || {};
+
+  try {
+    let enriched = null;
+    if (productId) {
+      const rows = await queryPromise(
+        `SELECT p.productId, p.storeId, p.image_url, p.postId, p.imageId, p.timestamp,
+                s.storeName, s.facebookUrl, s.facebookPageId
+           FROM products p
+      LEFT JOIN stores s ON p.storeId = s.storeId
+          WHERE p.productId = ?
+          LIMIT 1`,
+        [productId],
+      );
+      enriched = rows?.[0] || null;
+    }
+
+    const resolvedProductId = enriched?.productId || productId || null;
+    const resolvedStoreId = enriched?.storeId || storeId || null;
+    const resolvedRawUrl = enriched?.image_url || rawProductImageUrl || null;
+    const resolvedCloudinaryUrl = attemptedCloudinaryUrl || null;
+    const resolvedFailingUrl = failingUrl || null;
+    const dedupeUrl = String(resolvedFailingUrl || resolvedCloudinaryUrl || resolvedRawUrl || '').trim();
+
+    logger.info(
+      `[BrokenImage][REPORT] productId=${resolvedProductId || 'n/a'} storeId=${resolvedStoreId || 'n/a'} error=${clientError || 'unknown'} rawUrl=${resolvedRawUrl || 'n/a'} cloudinaryUrl=${resolvedCloudinaryUrl || 'n/a'} failingUrl=${resolvedFailingUrl || 'n/a'}`,
+    );
+
+    if (!dedupeUrl) {
+      return res.status(400).json({ error: 'A valid failingUrl/cloudinaryUrl/rawProductImageUrl is required' });
+    }
+
+    const existing = await queryPromise(
+      `SELECT id
+         FROM broken_image_logs
+        WHERE failing_url = ?
+        LIMIT 1`,
+      [dedupeUrl],
+    );
+    if ((existing?.length || 0) > 0) {
+      logger.info(`[BrokenImage][REPORT] duplicate-url-skipped url=${dedupeUrl}`);
+      return res.status(200).json({ message: 'Duplicate broken image URL skipped.' });
+    }
+
+    await queryPromise(
+      `INSERT INTO broken_image_logs
+        (product_id, store_id, store_name, store_facebook_url, store_facebook_page_id,
+         facebook_post_id, facebook_image_id, facebook_timestamp,
+         raw_product_image_url, attempted_cloudinary_url, failing_url,
+         client_error, source_page, user_agent, extra_details)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        resolvedProductId,
+        resolvedStoreId,
+        enriched?.storeName || storeName || null,
+        enriched?.facebookUrl || null,
+        enriched?.facebookPageId || null,
+        enriched?.postId || facebookPostId || null,
+        enriched?.imageId || facebookImageId || null,
+        enriched?.timestamp || facebookTimestamp || null,
+        resolvedRawUrl,
+        resolvedCloudinaryUrl,
+        dedupeUrl,
+        clientError || 'unknown',
+        sourcePage || null,
+        userAgent || null,
+        JSON.stringify({ reportedAt: new Date().toISOString() }),
+      ],
+    );
+
+    logger.info(
+      `[BrokenImage][SAVED] productId=${resolvedProductId || 'n/a'} storeId=${resolvedStoreId || 'n/a'} failingUrl=${resolvedFailingUrl || resolvedCloudinaryUrl || resolvedRawUrl || 'n/a'}`,
+    );
+
+    return res.status(201).json({ message: 'Broken image log saved.' });
+  } catch (error) {
+    logger.error('Failed to save broken image log:', error.message);
+    return res.status(500).json({ error: 'Failed to save broken image log' });
+  }
+});
+
+app.post('/scan-broken-product-images', async (req, res) => {
+  const requestedProductId = req.body?.productId || req.query?.productId || null;
+  const requestedUrl = String(req.body?.url || req.query?.url || '').trim();
+  const requestedLimitRaw = parseInt(req.body?.limit || req.query?.limit, 10);
+  const limit = Number.isFinite(requestedLimitRaw) && requestedLimitRaw > 0 ? Math.min(requestedLimitRaw, 500) : 100;
+
+  try {
+    let rows = [];
+    if (requestedUrl) {
+      rows = [{ productId: null, image_url: requestedUrl }];
+    } else if (requestedProductId) {
+      rows = await queryPromise(
+        `SELECT p.productId, p.image_url
+           FROM products p
+          WHERE p.productId = ?
+          LIMIT 1`,
+        [requestedProductId],
+      );
+    } else {
+      rows = await queryPromise(
+        `SELECT MIN(p.productId) AS productId, p.image_url
+           FROM products p
+          WHERE p.image_url IS NOT NULL AND p.image_url <> ''
+       GROUP BY p.image_url
+       ORDER BY MIN(p.productId) DESC
+          LIMIT ?`,
+        [limit],
+      );
+    }
+
+    let scanned = 0;
+    let broken = 0;
+    let skipped = 0;
+
+    for (const row of rows) {
+      if (!row?.productId || !row?.image_url) {
+        skipped += 1;
+        continue;
+      }
+
+      scanned += 1;
+      const result = await probeAndLogBrokenImage({
+        productId: row.productId || null,
+        imageUrl: row.image_url,
+        sourcePage: 'dashboard-manual-scan',
+        logPrefix: '[BrokenImage][SCAN]',
+        extraDetails: { requestedProductId, requestedUrl, limit },
+      });
+      if (result.status === 'broken' || result.status === 'failed') broken += 1;
+    }
+
+    return res.status(200).json({
+      message: 'Broken image scan complete.',
+      scanned,
+      broken,
+      skipped,
+      limit,
+      productId: requestedProductId || null,
+      url: requestedUrl || null,
+    });
+  } catch (error) {
+    logger.error('Failed to scan broken image urls:', error.message);
+    return res.status(500).json({ error: 'Failed to scan broken image urls' });
+  }
+});
+
+app.get('/broken-image-logs', async (req, res) => {
+  const limitRaw = parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 200;
+
+  try {
+    const rows = await queryPromise(
+      `SELECT id, product_id, store_id, store_name, store_facebook_url, store_facebook_page_id,
+              facebook_post_id, facebook_image_id, facebook_timestamp,
+              raw_product_image_url, attempted_cloudinary_url, failing_url,
+              client_error, source_page, user_agent, created_at
+         FROM broken_image_logs
+     ORDER BY created_at DESC
+        LIMIT ?`,
+      [limit],
+    );
+
+    return res.status(200).json({ data: rows });
+  } catch (error) {
+    logger.error('Failed to fetch broken image logs:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch broken image logs' });
+  }
+});
+
 app.get('/getProductsWithKeywords', (req, res) => {
+  const requestedLimit = parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 2000) : 100;
   db.query(
-    "SELECT p.productId, p.product_description, p.old_price, p.new_price, p.discount_percentage, p.sale_end_date, p.storeId, p.image_url, GROUP_CONCAT(k.keyword SEPARATOR ', ') AS keywords FROM products p LEFT JOIN productkeywords pk ON p.productId = pk.productId LEFT JOIN keywords k ON pk.keywordId = k.keywordId GROUP BY p.productId ORDER BY p.productId desc LIMIT 100",
+    "SELECT p.productId, p.product_description, p.old_price, p.new_price, p.discount_percentage, p.sale_end_date, p.storeId, p.image_url, GROUP_CONCAT(k.keyword SEPARATOR ', ') AS keywords FROM products p LEFT JOIN productkeywords pk ON p.productId = pk.productId LEFT JOIN keywords k ON pk.keywordId = k.keywordId GROUP BY p.productId ORDER BY p.productId desc LIMIT ?",
+    [limit],
     (err, data) => {
       if (err) return res.status(500).json({ error: 'Failed to fetch' });
       return res.json(data);
@@ -1042,6 +1341,10 @@ async function initializeDatabaseTables() {
       'CREATE TABLE IF NOT EXISTS `ingest_store_logs` (`id` INT NOT NULL AUTO_INCREMENT, `job_log_id` INT NOT NULL, `store_id` INT NOT NULL, `posts_fetched` INT DEFAULT 0, `images_discovered` INT DEFAULT 0, `images_uploaded` INT DEFAULT 0, `images_with_products` INT DEFAULT 0, `products_inserted` INT DEFAULT 0, `errors` TEXT DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`id`), CONSTRAINT `fk_ingest_store_logs_job_logs` FOREIGN KEY (`job_log_id`) REFERENCES `job_logs` (`id`) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
     );
     logger.info('ingest_store_logs table initialized.');
+    await queryPromise(
+      'CREATE TABLE IF NOT EXISTS `broken_image_logs` (`id` INT NOT NULL AUTO_INCREMENT, `product_id` INT DEFAULT NULL, `store_id` INT DEFAULT NULL, `store_name` VARCHAR(150) DEFAULT NULL, `store_facebook_url` VARCHAR(255) DEFAULT NULL, `store_facebook_page_id` VARCHAR(100) DEFAULT NULL, `facebook_post_id` BIGINT DEFAULT NULL, `facebook_image_id` BIGINT DEFAULT NULL, `facebook_timestamp` TIMESTAMP NULL DEFAULT NULL, `raw_product_image_url` TEXT DEFAULT NULL, `attempted_cloudinary_url` TEXT DEFAULT NULL, `failing_url` TEXT DEFAULT NULL, `client_error` VARCHAR(100) DEFAULT NULL, `source_page` VARCHAR(100) DEFAULT NULL, `user_agent` VARCHAR(500) DEFAULT NULL, `extra_details` JSON DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`id`), KEY `idx_broken_image_logs_product_id` (`product_id`), KEY `idx_broken_image_logs_store_id` (`store_id`), KEY `idx_broken_image_logs_created_at` (`created_at`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    );
+    logger.info('broken_image_logs table initialized.');
     await queryPromise(
       'CREATE TABLE IF NOT EXISTS `ingest_gemini_batches` (`id` INT NOT NULL AUTO_INCREMENT, `store_id` INT NOT NULL, `provider_batch_name` VARCHAR(255) NOT NULL, `model_name` VARCHAR(100) NOT NULL, `status` VARCHAR(30) NOT NULL DEFAULT "pending", `run_label` VARCHAR(100) DEFAULT NULL, `total_items` INT NOT NULL DEFAULT 0, `completed_items` INT NOT NULL DEFAULT 0, `failed_items` INT NOT NULL DEFAULT 0, `error_message` TEXT DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`id`), UNIQUE KEY `uniq_provider_batch_name` (`provider_batch_name`), KEY `idx_batch_status` (`status`), KEY `idx_batch_store` (`store_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
     );

@@ -243,9 +243,7 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 
       try {
         const products = JSON5.parse(text);
-        const validProducts = Array.isArray(products)
-          ? products.filter((product) => product.valid_product !== false)
-          : [];
+        const validProducts = sanitizeProductsForInsert(products, formattedToday);
 
         recordImageResult({
           storeId,
@@ -265,7 +263,7 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
       } catch (parseError) {
         const salvagedProducts = salvageProductsFromTruncatedJsonArray(text);
         if (salvagedProducts.length > 0) {
-          const validProducts = salvagedProducts.filter((product) => product.valid_product !== false);
+          const validProducts = sanitizeProductsForInsert(salvagedProducts, formattedToday);
           recordImageResult({
             storeId,
             imageId: imageIdForRun,
@@ -304,9 +302,7 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
               .replace(/`/g, '');
 
             const retryProducts = JSON5.parse(retryText);
-            const validRetryProducts = Array.isArray(retryProducts)
-              ? retryProducts.filter((product) => product.valid_product !== false)
-              : [];
+            const validRetryProducts = sanitizeProductsForInsert(retryProducts, formattedToday);
 
             recordImageResult({
               storeId,
@@ -359,6 +355,56 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
     }
   }
   return allProducts;
+}
+
+function sanitizeProductsForInsert(products, formattedToday) {
+  if (!Array.isArray(products)) return [];
+
+  const cleaned = products.filter((product) => {
+    if (!product || typeof product !== 'object') return false;
+    if (product.valid_product === false) return false;
+
+    const description = String(product.product_description || '').trim();
+    if (description.length < 3) return false;
+
+    // Must include visible alphabetic content to avoid noise like symbols-only outputs.
+    if (!/[a-zA-Z\u00C0-\u024F]/.test(description)) return false;
+
+    const newPrice = toPriceNumber(product.new_price);
+    if (!Number.isFinite(newPrice) || newPrice <= 0) return false;
+
+    // Reject clearly invalid or hallucinated extreme prices.
+    if (newPrice > 10000) return false;
+
+    const saleEndDate = String(product.sale_end_date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(saleEndDate)) return false;
+    if (saleEndDate < formattedToday) return false;
+
+    // Normalize prices before insert to keep DB values consistent.
+    product.new_price = newPrice;
+    const oldPrice = toPriceNumber(product.old_price);
+    product.old_price = Number.isFinite(oldPrice) && oldPrice > 0 ? oldPrice : null;
+
+    return true;
+  });
+
+  return cleaned;
+}
+
+function toPriceNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  if (value === null || value === undefined) return NaN;
+
+  const normalized = String(value)
+    .trim()
+    .replace(/€/g, '')
+    .replace(/\s+/g, '')
+    .replace(/,/g, '.')
+    .replace(/[^0-9.\-]/g, '');
+
+  if (!normalized) return NaN;
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : NaN;
 }
 
 function classifyGeminiApiError(error) {
