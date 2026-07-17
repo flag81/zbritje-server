@@ -67,9 +67,19 @@ export async function insertProducts1(jsonData) {
   if (!Array.isArray(products)) return;
   if (products.length === 0) return;
 
-  const normalizedProducts = products
-    .map((product) => normalizeProductForInsert(product))
-    .filter(Boolean);
+  const normalizationResults = products.map((product) => normalizeProductForInsert(product));
+  const normalizedProducts = normalizationResults.filter((result) => result.normalized).map((result) => result.normalized);
+  const rejectedProducts = normalizationResults
+    .filter((result) => !result.normalized)
+    .map((result) => ({ source: 'insertProducts1', reason: result.reason, product: result.original }));
+
+  if (rejectedProducts.length > 0) {
+    try {
+      await logRejectedProducts(rejectedProducts);
+    } catch (logErr) {
+      allMessages.push(`Warning: failed to log rejected products: ${logErr.message}`);
+    }
+  }
 
   if (normalizedProducts.length === 0) {
     allMessages.push('No valid offer products to insert (skipped invalid/non-priced entries).');
@@ -159,26 +169,36 @@ export async function insertProducts1(jsonData) {
 }
 
 function normalizeProductForInsert(product) {
-  if (!product || typeof product !== 'object') return null;
+  if (!product || typeof product !== 'object') {
+    return { normalized: null, reason: 'invalid-product-object', original: product };
+  }
 
   const productDescription = String(product.product_description || '').trim();
-  if (productDescription.length < 3) return null;
+  if (productDescription.length < 3) {
+    return { normalized: null, reason: 'missing-or-short-description', original: product };
+  }
 
   const newPriceNumber = parsePriceNumber(product.new_price);
   if (!Number.isFinite(newPriceNumber) || newPriceNumber <= 0 || newPriceNumber > 10000) {
-    return null;
+    return { normalized: null, reason: 'invalid-new-price', original: product };
   }
 
   const oldPriceNumber = parsePriceNumber(product.old_price);
   const saleEndDate = String(product.sale_end_date || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(saleEndDate)) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(saleEndDate)) {
+    return { normalized: null, reason: 'invalid-sale-end-date', original: product };
+  }
 
   return {
-    ...product,
-    product_description: productDescription,
-    old_price: Number.isFinite(oldPriceNumber) && oldPriceNumber > 0 ? oldPriceNumber : 0,
-    new_price: newPriceNumber,
-    sale_end_date: saleEndDate,
+    normalized: {
+      ...product,
+      product_description: productDescription,
+      old_price: Number.isFinite(oldPriceNumber) && oldPriceNumber > 0 ? oldPriceNumber : 0,
+      new_price: newPriceNumber,
+      sale_end_date: saleEndDate,
+    },
+    reason: null,
+    original: product,
   };
 }
 
@@ -194,4 +214,71 @@ function parsePriceNumber(value) {
 
   const parsed = Number.parseFloat(normalized);
   return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+export async function logRejectedProducts(rejections) {
+  if (!Array.isArray(rejections) || rejections.length === 0) return;
+
+  const seenImageUrlsInBatch = new Set();
+  const seenImageIdsInBatch = new Set();
+
+  for (const entry of rejections) {
+    const product = entry?.product && typeof entry.product === 'object' ? entry.product : {};
+    const imageUrl = product.image_url ? String(product.image_url).trim() : '';
+    const imageId = toNullableBigInt(product.imageId);
+
+    // Skip duplicates within the same logging call first.
+    if (imageUrl && seenImageUrlsInBatch.has(imageUrl)) continue;
+    if (imageId !== null && seenImageIdsInBatch.has(imageId)) continue;
+
+    // Skip duplicates already present in DB (image URL preferred, imageId fallback).
+    if (imageUrl) {
+      const existingByUrl = await queryPromise(
+        `SELECT id FROM ingest_rejected_products WHERE image_url = ? LIMIT 1`,
+        [imageUrl],
+      );
+      if ((existingByUrl?.length || 0) > 0) continue;
+    } else if (imageId !== null) {
+      const existingByImageId = await queryPromise(
+        `SELECT id FROM ingest_rejected_products WHERE image_id = ? LIMIT 1`,
+        [imageId],
+      );
+      if ((existingByImageId?.length || 0) > 0) continue;
+    }
+
+    if (imageUrl) seenImageUrlsInBatch.add(imageUrl);
+    if (imageId !== null) seenImageIdsInBatch.add(imageId);
+
+    await queryPromise(
+      `INSERT INTO ingest_rejected_products
+        (source, reason, store_id, user_id, post_id, image_id, flyer_book_id, image_url,
+         product_description, old_price_raw, new_price_raw, sale_end_date_raw, raw_payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        String(entry?.source || 'unknown').slice(0, 120),
+        String(entry?.reason || 'unknown').slice(0, 120),
+        toNullableInt(product.storeId),
+        toNullableInt(product.userId),
+        toNullableBigInt(product.postId),
+        imageId,
+        product.flyer_book_id !== undefined && product.flyer_book_id !== null ? String(product.flyer_book_id).slice(0, 64) : null,
+        imageUrl ? imageUrl.slice(0, 2048) : null,
+        product.product_description ? String(product.product_description).slice(0, 500) : null,
+        product.old_price !== undefined && product.old_price !== null ? String(product.old_price).slice(0, 64) : null,
+        product.new_price !== undefined && product.new_price !== null ? String(product.new_price).slice(0, 64) : null,
+        product.sale_end_date !== undefined && product.sale_end_date !== null ? String(product.sale_end_date).slice(0, 64) : null,
+        JSON.stringify(product),
+      ],
+    );
+  }
+}
+
+function toNullableInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toNullableBigInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }

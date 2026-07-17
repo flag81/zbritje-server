@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import axios from 'axios';
 import JSON5 from 'json5';
-import { insertProducts1, salvageProductsFromTruncatedJsonArray } from './productService.js';
+import { insertProducts1, logRejectedProducts, salvageProductsFromTruncatedJsonArray } from './productService.js';
 import logger from './logger.js';
 
 const aiStudio = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -243,7 +243,10 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 
       try {
         const products = JSON5.parse(text);
-        const validProducts = sanitizeProductsForInsert(products, formattedToday);
+        const { accepted: validProducts, rejected } = sanitizeProductsForInsert(products, formattedToday);
+        if (rejected.length > 0) {
+          await logRejectedProducts(rejected.map((entry) => ({ ...entry, source: `${runLabel}:parsed` })));
+        }
 
         recordImageResult({
           storeId,
@@ -263,7 +266,10 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
       } catch (parseError) {
         const salvagedProducts = salvageProductsFromTruncatedJsonArray(text);
         if (salvagedProducts.length > 0) {
-          const validProducts = sanitizeProductsForInsert(salvagedProducts, formattedToday);
+          const { accepted: validProducts, rejected } = sanitizeProductsForInsert(salvagedProducts, formattedToday);
+          if (rejected.length > 0) {
+            await logRejectedProducts(rejected.map((entry) => ({ ...entry, source: `${runLabel}:salvaged` })));
+          }
           recordImageResult({
             storeId,
             imageId: imageIdForRun,
@@ -302,7 +308,10 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
               .replace(/`/g, '');
 
             const retryProducts = JSON5.parse(retryText);
-            const validRetryProducts = sanitizeProductsForInsert(retryProducts, formattedToday);
+            const { accepted: validRetryProducts, rejected } = sanitizeProductsForInsert(retryProducts, formattedToday);
+            if (rejected.length > 0) {
+              await logRejectedProducts(rejected.map((entry) => ({ ...entry, source: `${runLabel}:retry-parsed` })));
+            }
 
             recordImageResult({
               storeId,
@@ -358,37 +367,66 @@ Provide ONLY the JSON array of extracted product objects in your response. Do no
 }
 
 function sanitizeProductsForInsert(products, formattedToday) {
-  if (!Array.isArray(products)) return [];
+  if (!Array.isArray(products)) return { accepted: [], rejected: [] };
 
-  const cleaned = products.filter((product) => {
-    if (!product || typeof product !== 'object') return false;
-    if (product.valid_product === false) return false;
+  const accepted = [];
+  const rejected = [];
+
+  for (const product of products) {
+    if (!product || typeof product !== 'object') {
+      rejected.push({ reason: 'invalid-product-object', product });
+      continue;
+    }
+    if (product.valid_product === false) {
+      rejected.push({ reason: 'valid-product-false', product });
+      continue;
+    }
 
     const description = String(product.product_description || '').trim();
-    if (description.length < 3) return false;
+    if (description.length < 3) {
+      rejected.push({ reason: 'missing-or-short-description', product });
+      continue;
+    }
 
     // Must include visible alphabetic content to avoid noise like symbols-only outputs.
-    if (!/[a-zA-Z\u00C0-\u024F]/.test(description)) return false;
+    if (!/[a-zA-Z\u00C0-\u024F]/.test(description)) {
+      rejected.push({ reason: 'description-without-letters', product });
+      continue;
+    }
 
     const newPrice = toPriceNumber(product.new_price);
-    if (!Number.isFinite(newPrice) || newPrice <= 0) return false;
+    if (!Number.isFinite(newPrice) || newPrice <= 0) {
+      rejected.push({ reason: 'invalid-new-price', product });
+      continue;
+    }
 
     // Reject clearly invalid or hallucinated extreme prices.
-    if (newPrice > 10000) return false;
+    if (newPrice > 10000) {
+      rejected.push({ reason: 'new-price-too-large', product });
+      continue;
+    }
 
     const saleEndDate = String(product.sale_end_date || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(saleEndDate)) return false;
-    if (saleEndDate < formattedToday) return false;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(saleEndDate)) {
+      rejected.push({ reason: 'invalid-sale-end-date', product });
+      continue;
+    }
+    if (saleEndDate < formattedToday) {
+      rejected.push({ reason: 'sale-end-date-in-past', product });
+      continue;
+    }
 
     // Normalize prices before insert to keep DB values consistent.
-    product.new_price = newPrice;
     const oldPrice = toPriceNumber(product.old_price);
-    product.old_price = Number.isFinite(oldPrice) && oldPrice > 0 ? oldPrice : null;
+    accepted.push({
+      ...product,
+      product_description: description,
+      new_price: newPrice,
+      old_price: Number.isFinite(oldPrice) && oldPrice > 0 ? oldPrice : null,
+    });
+  }
 
-    return true;
-  });
-
-  return cleaned;
+  return { accepted, rejected };
 }
 
 function toPriceNumber(value) {

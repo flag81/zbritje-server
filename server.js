@@ -867,7 +867,7 @@ app.post('/scan-broken-product-images', async (req, res) => {
     let skipped = 0;
 
     for (const row of rows) {
-      if (!row?.productId || !row?.image_url) {
+      if (!row?.image_url) {
         skipped += 1;
         continue;
       }
@@ -918,6 +918,28 @@ app.get('/broken-image-logs', async (req, res) => {
   } catch (error) {
     logger.error('Failed to fetch broken image logs:', error.message);
     return res.status(500).json({ error: 'Failed to fetch broken image logs' });
+  }
+});
+
+app.get('/ingest-rejected-products', async (req, res) => {
+  const limitRaw = parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 1000) : 300;
+
+  try {
+    const rows = await queryPromise(
+      `SELECT id, source, reason, store_id, user_id, post_id, image_id, flyer_book_id,
+              image_url, product_description, old_price_raw, new_price_raw, sale_end_date_raw,
+              raw_payload, created_at
+         FROM ingest_rejected_products
+     ORDER BY created_at DESC
+        LIMIT ?`,
+      [limit],
+    );
+
+    return res.status(200).json({ data: rows });
+  } catch (error) {
+    logger.error('Failed to fetch ingest rejected products logs:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch ingest rejected products logs' });
   }
 });
 
@@ -1353,6 +1375,10 @@ async function initializeDatabaseTables() {
       'CREATE TABLE IF NOT EXISTS `ingest_gemini_batch_items` (`id` INT NOT NULL AUTO_INCREMENT, `batch_id` INT NOT NULL, `item_index` INT NOT NULL, `store_id` INT NOT NULL, `image_id` BIGINT DEFAULT NULL, `uploaded_url` TEXT DEFAULT NULL, `post_id` BIGINT DEFAULT NULL, `timestamp_unix` BIGINT DEFAULT NULL, `post_text` TEXT DEFAULT NULL, `flyer_book_id` VARCHAR(64) DEFAULT NULL, `user_id` INT DEFAULT NULL, `status` VARCHAR(30) NOT NULL DEFAULT "queued", `products_inserted` INT NOT NULL DEFAULT 0, `raw_response` MEDIUMTEXT DEFAULT NULL, `error_message` TEXT DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`id`), KEY `idx_batch_items_batch_id` (`batch_id`), KEY `idx_batch_items_status` (`status`), CONSTRAINT `fk_ingest_gemini_batch_items_batch` FOREIGN KEY (`batch_id`) REFERENCES `ingest_gemini_batches` (`id`) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
     );
     logger.info('ingest_gemini_batch_items table initialized.');
+    await queryPromise(
+      'CREATE TABLE IF NOT EXISTS `ingest_rejected_products` (`id` BIGINT NOT NULL AUTO_INCREMENT, `source` VARCHAR(120) NOT NULL, `reason` VARCHAR(120) NOT NULL, `store_id` INT DEFAULT NULL, `user_id` INT DEFAULT NULL, `post_id` BIGINT DEFAULT NULL, `image_id` BIGINT DEFAULT NULL, `flyer_book_id` VARCHAR(64) DEFAULT NULL, `image_url` VARCHAR(2048) DEFAULT NULL, `product_description` VARCHAR(500) DEFAULT NULL, `old_price_raw` VARCHAR(64) DEFAULT NULL, `new_price_raw` VARCHAR(64) DEFAULT NULL, `sale_end_date_raw` VARCHAR(64) DEFAULT NULL, `raw_payload` JSON DEFAULT NULL, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`id`), KEY `idx_rejected_created_at` (`created_at`), KEY `idx_rejected_reason` (`reason`), KEY `idx_rejected_store_id` (`store_id`), KEY `idx_rejected_image_id` (`image_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;',
+    );
+    logger.info('ingest_rejected_products table initialized.');
   } catch (err) {
     logger.error('Failed to initialize tables:', err.message);
   }
