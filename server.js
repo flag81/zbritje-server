@@ -91,13 +91,16 @@ app.use(requestLogger);
 const keyFilePath = path.join(__dirname, './persistent/keys/vision-ai-455010-6d2a9944437b.json');
 process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
 
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+const googleOAuthEnabled = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+
+if (googleOAuthEnabled) {
+  const backendBaseUrl = (process.env.BACKEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
   passport.use(
     new GoogleStrategy(
       {
         clientID: process.env.GOOGLE_CLIENT_ID,
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: 'http://localhost:3000/auth/google/callback',
+        callbackURL: process.env.GOOGLE_CALLBACK_URL || `${backendBaseUrl}/auth/google/callback`,
         passReqToCallback: true,
       },
       (req, accessToken, refreshToken, profile, done) => done(null, profile),
@@ -328,22 +331,169 @@ app.post('/dashboardLogin', (req, res) => {
   });
 });
 
-app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => {
-  const token = req.cookies.jwt;
-  if (!token) return res.status(400).json({ error: 'JWT token is missing' });
-  try {
-    const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-    const userId = decoded.userId;
-    const email = req.user.emails[0].value;
-    db.query(`UPDATE users SET email = ? WHERE userId = ?`, [email, userId], (err) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
-      res.redirect(`${process.env.FRONTEND_URL}?emailUpdated=true`);
-    });
-  } catch (err) {
-    return res.status(401).json({ error: 'Invalid token' });
+const getFrontendRedirectBase = () => {
+  const raw = process.env.FRONTEND_URL || 'http://localhost:5173';
+  return String(raw).replace(/\/\*$/, '').replace(/\/+$/, '');
+};
+
+const getGoogleCallbackUrl = () => {
+  const fallbackBase = (process.env.BACKEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+  return String(process.env.GOOGLE_CALLBACK_URL || `${fallbackBase}/auth/google/callback`).replace(/\/+$/, '');
+};
+
+const buildJwtCookieOptionsForRequest = (req) => {
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const isHttps = Boolean(req.secure) || (typeof forwardedProto === 'string' && forwardedProto.includes('https'));
+  const host = String(req.headers.host || '').split(':')[0];
+  const isMenivenDomain = host.endsWith('meniven.com');
+  const isLocalHost = host === 'localhost' || host === '127.0.0.1';
+  const isProduction = process.env.NODE_ENV === 'production' || isMenivenDomain;
+
+  // On localhost, force non-secure cookies so browser always persists them on http://localhost.
+  const useSecureCookie = isProduction ? isHttps : false;
+
+  return {
+    httpOnly: true,
+    secure: useSecureCookie,
+    sameSite: useSecureCookie ? 'None' : 'Lax',
+    path: '/',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    ...(isMenivenDomain && !isLocalHost ? { domain: '.meniven.com' } : {}),
+  };
+};
+
+app.get('/auth/google', (req, res, next) => {
+  if (!googleOAuthEnabled) {
+    logger.warn('[GoogleOAuth] Disabled: missing client id/secret');
+    return res.redirect(`${getFrontendRedirectBase()}/?auth=google_not_configured`);
   }
+
+  logger.info(`[GoogleOAuth] Starting login flow callback=${getGoogleCallbackUrl()}`);
+
+  return passport.authenticate('google', {
+    scope: ['profile', 'email'],
+    prompt: 'select_account',
+    session: false,
+    callbackURL: getGoogleCallbackUrl(),
+  })(req, res, next);
 });
+
+app.get(
+  '/auth/google/callback',
+  (req, res, next) => {
+    if (!googleOAuthEnabled) {
+      logger.warn('[GoogleOAuth] Callback hit while Google OAuth is disabled');
+      return res.redirect(`${getFrontendRedirectBase()}/?auth=google_not_configured`);
+    }
+
+    logger.info('[GoogleOAuth] Callback received, authenticating Google user');
+    return passport.authenticate('google', { session: false }, (err, user, info) => {
+      if (err) {
+        logger.error('Google OAuth passport error:', err);
+        const reason = encodeURIComponent(err.message || 'passport_error');
+        return res.redirect(`${getFrontendRedirectBase()}/?auth=google_failed&reason=${reason}`);
+      }
+
+      if (!user) {
+        logger.warn('[GoogleOAuth] Passport did not return a user', info);
+        const reason = encodeURIComponent(info?.message || info?.name || 'no_user');
+        return res.redirect(`${getFrontendRedirectBase()}/?auth=google_failed&reason=${reason}`);
+      }
+
+      req.user = user;
+      logger.info(`[GoogleOAuth] Passport success for googleId=${user?.id || 'n/a'}`);
+      return next();
+    })(req, res, next);
+  },
+  async (req, res) => {
+    try {
+      if (!process.env.TOKEN_SECRET) {
+        logger.error('[GoogleOAuth] TOKEN_SECRET missing');
+        return res.redirect(`${getFrontendRedirectBase()}/?auth=google_error`);
+      }
+
+      const googleId = req.user?.id ? String(req.user.id) : null;
+      const profileEmail = String(req.user?.emails?.[0]?.value || '').trim().toLowerCase();
+      const email = profileEmail || null;
+      const firstName = String(req.user?.name?.givenName || '').trim();
+      const lastName = String(req.user?.name?.familyName || '').trim();
+
+      if (!googleId || !email) {
+        return res.redirect(`${getFrontendRedirectBase()}/?auth=google_missing_profile`);
+      }
+
+      const columnRows = await queryPromise(
+        `SELECT COUNT(*) AS count
+           FROM information_schema.columns
+          WHERE table_schema = DATABASE()
+            AND table_name = 'users'
+            AND column_name = 'googleId'`,
+        [],
+      );
+      const hasGoogleIdColumn = Number(columnRows?.[0]?.count || 0) > 0;
+
+      const existingRows = await queryPromise(
+        hasGoogleIdColumn
+          ? `SELECT id, userId, email FROM users WHERE googleId = ? OR email = ? ORDER BY id DESC LIMIT 1`
+          : `SELECT id, userId, email FROM users WHERE email = ? ORDER BY id DESC LIMIT 1`,
+        hasGoogleIdColumn ? [googleId, email] : [email],
+      );
+
+      let dbUserId;
+      if (Array.isArray(existingRows) && existingRows.length > 0) {
+        logger.info(`[GoogleOAuth] Linking existing user id=${existingRows[0].id} googleId=${googleId}`);
+        dbUserId = existingRows[0].id;
+        const updateSql = hasGoogleIdColumn
+          ? `UPDATE users
+             SET googleId = ?, email = ?, first_name = COALESCE(NULLIF(first_name, ''), ?), last_name = COALESCE(NULLIF(last_name, ''), ?), is_registered = 1
+             WHERE id = ?`
+          : `UPDATE users
+             SET email = ?, first_name = COALESCE(NULLIF(first_name, ''), ?), last_name = COALESCE(NULLIF(last_name, ''), ?), is_registered = 1
+             WHERE id = ?`;
+        const updateParams = hasGoogleIdColumn
+          ? [googleId, email, firstName || 'Google', lastName || '', dbUserId]
+          : [email, firstName || 'Google', lastName || '', dbUserId];
+        await queryPromise(updateSql, updateParams);
+      } else {
+        const publicUserId = `google_${googleId}`;
+        logger.info(`[GoogleOAuth] Creating new Google user publicUserId=${publicUserId}`);
+        const insertSql = hasGoogleIdColumn
+          ? `INSERT INTO users (userId, first_name, last_name, email, googleId, is_registered, timestamp)
+             VALUES (?, ?, ?, ?, ?, 1, NOW())`
+          : `INSERT INTO users (userId, first_name, last_name, email, is_registered, timestamp)
+             VALUES (?, ?, ?, ?, 1, NOW())`;
+        const insertParams = hasGoogleIdColumn
+          ? [publicUserId, firstName || 'Google', lastName || '', email, googleId]
+          : [publicUserId, firstName || 'Google', lastName || '', email];
+        const insertResult = await queryPromise(insertSql, insertParams);
+        dbUserId = insertResult?.insertId;
+      }
+
+      if (!dbUserId) {
+        logger.error('[GoogleOAuth] Could not resolve dbUserId after upsert');
+        return res.redirect(`${getFrontendRedirectBase()}/?auth=google_error`);
+      }
+
+      const token = jwt.sign({ userId: dbUserId, email }, process.env.TOKEN_SECRET, { expiresIn: '30d' });
+      const cookieOptions = buildJwtCookieOptionsForRequest(req);
+      logger.info('[GoogleOAuth] Setting jwt cookie options', {
+        secure: cookieOptions.secure,
+        sameSite: cookieOptions.sameSite,
+        domain: cookieOptions.domain || null,
+        path: cookieOptions.path || null,
+        maxAge: cookieOptions.maxAge,
+        reqHost: req.headers.host || null,
+        forwardedProto: req.headers['x-forwarded-proto'] || null,
+      });
+      res.cookie('jwt', token, cookieOptions);
+      logger.info(`[GoogleOAuth] Login complete dbUserId=${dbUserId} email=${email}`);
+      return res.redirect(`${getFrontendRedirectBase()}/?auth=google_success`);
+    } catch (err) {
+      logger.error('Google OAuth callback failed:', err);
+      return res.redirect(`${getFrontendRedirectBase()}/?auth=google_error`);
+    }
+  },
+);
 
 // =========================================================================
 // USER PREFERENCES
